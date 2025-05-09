@@ -1,0 +1,14 @@
+/node_modules
+**/*.dist
+**/*.build
+**/*.coverage
+**/*.logs
+**/*.tmp
+**/.wrangler
+**/workers/node_modules
+**/workers/dist
+**/workers/build
+**/workers/coverage
+**/workers/logs
+**/workers/tmp
+
