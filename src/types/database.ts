@@ -70,29 +70,38 @@ export interface Database {
         Row: {
           api_id: string;
           event_api_id: string;
+          event_name: string;
           email: string;
           name: string;
           first_name: string;
           last_name: string;
           avatar_url: string;
+          created_at: string;
+          updated_at: string;
         };
         Insert: {
           api_id: string;
           event_api_id: string;
+          event_name: string;
           email: string;
           name: string;
           first_name: string;
           last_name: string;
           avatar_url: string;
+          created_at: string;
+          updated_at: string;
         };
         Update: {
           api_id?: string;
           event_api_id?: string;
+          event_name?: string;
           email?: string;
           name?: string;
           first_name?: string;
           last_name?: string;
           avatar_url?: string;
+          created_at?: string;
+          updated_at?: string;
         };
       };
       guests: {

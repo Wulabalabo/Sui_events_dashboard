@@ -69,7 +69,12 @@ async function fetchAllEventData(lumaService: LumaService): Promise<{
     console.log(`处理事件: ${event.event.name}`);
     const details = await lumaService.getEventDetails(event.event.api_id);
     if (details.hosts && details.hosts.length > 0) {
-      hosts.push(...details.hosts);
+      const hostsWithEventInfo = details.hosts.map(host => ({
+        ...host,
+        event_api_id: event.event.api_id,
+        event_name: event.event.name
+      }));
+      hosts.push(...hostsWithEventInfo);
     }
 
     const eventGuests = await lumaService.getEventGuests(event.event.api_id);
@@ -80,8 +85,16 @@ async function fetchAllEventData(lumaService: LumaService): Promise<{
     guests.push(...guestsWithEventId);
   }
 
-  console.log(`获取到 ${hosts.length} 个主办方和 ${guests.length} 个嘉宾`);
-  return { events, hosts, guests };
+  const uniqueHosts = hosts.reduce((acc, host) => {
+    const existingHost = acc.find(h => h.api_id === host.api_id && h.event_api_id === host.event_api_id);
+    if (!existingHost || new Date(host.updated_at) > new Date(existingHost.updated_at)) {
+      return [...acc.filter(h => !(h.api_id === host.api_id && h.event_api_id === host.event_api_id)), host];
+    }
+    return acc;
+  }, [] as LumaHost[]);
+
+  console.log(`获取到 ${uniqueHosts.length} 个主办方和 ${guests.length} 个嘉宾`);
+  return { events, hosts: uniqueHosts, guests };
 }
 
 /**

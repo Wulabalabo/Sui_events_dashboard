@@ -60,6 +60,7 @@ export class SupabaseService {
           .upsert({
             api_id: host.api_id,
             event_api_id: eventApiId,
+            event_name: event.name,
             name: host.name,
             email: host.email,
             first_name: host.first_name,
@@ -68,7 +69,7 @@ export class SupabaseService {
             created_at: now,
             updated_at: now
           }, {
-            onConflict: 'api_id'
+            onConflict: 'api_id,event_api_id'
           });
 
         if (hostError) {

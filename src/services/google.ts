@@ -319,24 +319,56 @@ export class GoogleSheetsService {
 
   // 同步主持人数据
   private async syncHostsData(hosts: LumaHost[]): Promise<void> {
-    const headers = [
-      'API ID', 'Event API ID', 'Name', 'Email', 'First Name',
-      'Last Name', 'Avatar URL', 'Created At', 'Updated At'
-    ];
+    try {
+      const accessToken = await this.getAccessToken();
+      console.log('准备同步主持人数据...');
 
-    const rows = hosts.map(host => [
-      host.api_id,
-      host.event_api_id,
-      host.name,
-      host.email,
-      host.first_name,
-      host.last_name,
-      host.avatar_url,
-      host.created_at,
-      host.updated_at
-    ]);
+      // 准备表头
+      const headers = [
+        'Host ID',
+        'Event ID',
+        'Event Name',  // 添加事件名称
+        'Host Name',
+        'Email',
+        'First Name',
+        'Last Name',
+        'Avatar URL',
+        'Created At',
+        'Updated At'
+      ];
 
-    await this.writeToSheet('Hosts', [headers, ...rows]);
+      // 按 event_api_id 分组 hosts
+      const hostsByEvent = hosts.reduce((acc, host) => {
+        if (!acc[host.event_api_id]) {
+          acc[host.event_api_id] = [];
+        }
+        acc[host.event_api_id].push(host);
+        return acc;
+      }, {} as Record<string, LumaHost[]>);
+
+      // 准备数据行
+      const rows = Object.entries(hostsByEvent).flatMap(([eventId, eventHosts]) => {
+        return eventHosts.map(host => [
+          host.api_id,
+          eventId,
+          host.event_name || '',  // 需要从事件数据中获取
+          host.name,
+          host.email,
+          host.first_name || '',
+          host.last_name || '',
+          host.avatar_url || '',
+          host.created_at,
+          host.updated_at
+        ]);
+      });
+
+      // 写入数据
+      await this.writeToSheet('Hosts', [headers, ...rows]);
+      console.log(`成功同步 ${rows.length} 条主持人数据`);
+    } catch (error) {
+      console.error('同步主持人数据时发生错误:', error);
+      throw error;
+    }
   }
 
   // 同步参与者数据

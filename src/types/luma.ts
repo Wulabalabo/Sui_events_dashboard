@@ -6,6 +6,7 @@ export interface LumaGeoAddress {
 export interface LumaHost {
   api_id: string;
   event_api_id: string;
+  event_name?: string;
   name: string;
   email: string;
   first_name?: string;
