@@ -28,7 +28,7 @@ interface SyncResult {
 }
 
 /**
- * 验证环境变量
+ * Validate environment variables
  */
 function validateEnv(env: Env): void {
   const required = {
@@ -45,28 +45,28 @@ function validateEnv(env: Env): void {
     .map(([key]) => key);
 
   if (missing.length > 0) {
-    throw new Error(`缺少必要的环境变量: ${missing.join(', ')}`);
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
 }
 
 /**
- * 获取所有事件数据
+ * Fetch all event data
  */
 async function fetchAllEventData(lumaService: LumaService): Promise<{
   events: CalendarEvent[];
   hosts: LumaHost[];
   guests: LumaGuest[];
 }> {
-  console.log('获取所有事件...');
+  console.log('Fetching all events...');
   const events = await lumaService.getAllEvents();
-  console.log(`获取到 ${events.length} 个事件`);
+  console.log(`Retrieved ${events.length} events`);
 
-  console.log('获取事件详情和嘉宾...');
+  console.log('Fetching event details and guests...');
   const hosts: LumaHost[] = [];
   const guests: LumaGuest[] = [];
 
   for (const event of events) {
-    console.log(`处理事件: ${event.event.name}`);
+    console.log(`Processing event: ${event.event.name}`);
     const details = await lumaService.getEventDetails(event.event.api_id);
     if (details.hosts && details.hosts.length > 0) {
       const hostsWithEventInfo = details.hosts.map(host => ({
@@ -93,12 +93,12 @@ async function fetchAllEventData(lumaService: LumaService): Promise<{
     return acc;
   }, [] as LumaHost[]);
 
-  console.log(`获取到 ${uniqueHosts.length} 个主办方和 ${guests.length} 个嘉宾`);
+  console.log(`Retrieved ${uniqueHosts.length} hosts and ${guests.length} guests`);
   return { events, hosts: uniqueHosts, guests };
 }
 
 /**
- * 同步数据到数据库
+ * Sync data to database
  */
 async function syncToDatabase(env: Env): Promise<SyncResult> {
   try {
@@ -107,15 +107,15 @@ async function syncToDatabase(env: Env): Promise<SyncResult> {
 
     const { events, hosts, guests } = await fetchAllEventData(lumaService);
 
-    console.log('开始同步到数据库...');
+    console.log('Starting database sync...');
     for (const event of events) {
       await supabaseService.syncEvents([event], hosts, guests, event.event.api_id);
     }
-    console.log('数据库同步完成');
+    console.log('Database sync completed');
 
     return {
       success: true,
-      message: '数据库同步成功',
+      message: 'Database sync successful',
       stats: {
         events: events.length,
         hosts: hosts.length,
@@ -123,17 +123,17 @@ async function syncToDatabase(env: Env): Promise<SyncResult> {
       }
     };
   } catch (error) {
-    console.error('数据库同步失败:', error);
+    console.error('Database sync failed:', error);
     return {
       success: false,
-      message: '数据库同步失败',
-      error: error instanceof Error ? error.message : '未知错误'
+      message: 'Database sync failed',
+      error: error instanceof Error ? error.message : 'Unknown error'
     };
   }
 }
 
 /**
- * 同步数据到 Google Sheets
+ * Sync data to Google Sheets
  */
 async function syncToGoogleSheets(env: Env): Promise<SyncResult> {
   try {
@@ -146,13 +146,13 @@ async function syncToGoogleSheets(env: Env): Promise<SyncResult> {
 
     const { events, hosts, guests } = await fetchAllEventData(lumaService);
 
-    console.log('开始同步到 Google Sheets...');
+    console.log('Starting Google Sheets sync...');
     await googleSheetsService.syncEvents(events, hosts, guests);
-    console.log('Google Sheets 同步完成');
+    console.log('Google Sheets sync completed');
 
     return {
       success: true,
-      message: 'Google Sheets 同步成功',
+      message: 'Google Sheets sync successful',
       stats: {
         events: events.length,
         hosts: hosts.length,
@@ -160,11 +160,11 @@ async function syncToGoogleSheets(env: Env): Promise<SyncResult> {
       }
     };
   } catch (error) {
-    console.error('Google Sheets 同步失败:', error);
+    console.error('Google Sheets sync failed:', error);
     return {
       success: false,
-      message: 'Google Sheets 同步失败',
-      error: error instanceof Error ? error.message : '未知错误'
+      message: 'Google Sheets sync failed',
+      error: error instanceof Error ? error.message : 'Unknown error'
     };
   }
 }
@@ -174,7 +174,7 @@ export default {
     try {
       validateEnv(env);
 
-      console.log('开始同步数据...');
+      console.log('Starting data sync...');
       const [dbResult, sheetsResult] = await Promise.all([
         syncToDatabase(env),
         syncToGoogleSheets(env)
@@ -182,13 +182,13 @@ export default {
 
       if (!dbResult.success || !sheetsResult.success) {
         throw new Error(
-          `同步失败:\n数据库: ${dbResult.error || '成功'}\nGoogle Sheets: ${sheetsResult.error || '成功'}`
+          `Sync failed:\nDatabase: ${dbResult.error || 'success'}\nGoogle Sheets: ${sheetsResult.error || 'success'}`
         );
       }
 
       return new Response(JSON.stringify({
         success: true,
-        message: '数据同步成功',
+        message: 'Data sync successful',
         stats: {
           database: dbResult.stats,
           googleSheets: sheetsResult.stats
@@ -197,7 +197,7 @@ export default {
         headers: { 'Content-Type': 'application/json' }
       });
     } catch (error) {
-      console.error('同步过程中出错:', error);
+      console.error('Error during sync:', error);
       return new Response(JSON.stringify({
         success: false,
         error: error instanceof Error ? error.message : String(error)
@@ -212,7 +212,7 @@ export default {
     try {
       validateEnv(env);
 
-      console.log('开始定时同步数据...');
+      console.log('Starting scheduled sync...');
       const [dbResult, sheetsResult] = await Promise.all([
         syncToDatabase(env),
         syncToGoogleSheets(env)
@@ -220,16 +220,16 @@ export default {
 
       if (!dbResult.success || !sheetsResult.success) {
         throw new Error(
-          `定时同步失败:\n数据库: ${dbResult.error || '成功'}\nGoogle Sheets: ${sheetsResult.error || '成功'}`
+          `Scheduled sync failed:\nDatabase: ${dbResult.error || 'success'}\nGoogle Sheets: ${sheetsResult.error || 'success'}`
         );
       }
 
-      console.log('定时同步完成', {
+      console.log('Scheduled sync completed', {
         database: dbResult.stats,
         googleSheets: sheetsResult.stats
       });
     } catch (error) {
-      console.error('定时同步失败:', error);
+      console.error('Scheduled sync failed:', error);
       throw error;
     }
   }

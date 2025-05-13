@@ -1,89 +1,128 @@
-# Luma 活动数据可视化系统
+# Sui Events Dashboard
 
-这是一个用于收集和可视化 Luma 活动数据的系统。该系统自动收集我方 Luma 账号主办的活动数据，并通过可视化工具展示全球参与分布和趋势图表。
+A comprehensive event management system that synchronizes event data between Luma, Supabase, and Google Sheets.
 
-## 功能特点
+## Features
 
-- 自动收集 Luma 活动数据
-- 提取参与者信息
-- 数据存储与可视化
-- 实时数据更新
-- 数据导出功能
-- 管理后台
+- **Multi-platform Data Synchronization**
+  - Syncs event data from Luma to Supabase database
+  - Syncs event data from Luma to Google Sheets
+  - Maintains data consistency across all platforms
 
-## 技术栈
+- **Event Management**
+  - Fetches all events from Luma
+  - Retrieves detailed event information
+  - Manages event hosts and guests
+  - Handles event updates and modifications
 
-- 前端：Next.js + TypeScript
-- 后端：Cloudflare Workers
-- 数据库：Supabase (PostgreSQL)
-- 可视化：Preset (Apache Superset)
+- **Automated Synchronization**
+  - Scheduled sync operations
+  - Real-time data updates
+  - Error handling and logging
+  - Status reporting
 
-## 环境要求
+## Technical Architecture
 
-- Node.js 18+
-- npm 或 yarn
-- Supabase 账号
-- Cloudflare 账号
-- Luma Pro 账号
+### Core Components
 
-## 快速开始
+1. **Luma Service**
+   - Handles all Luma API interactions
+   - Fetches events, hosts, and guests data
+   - Manages event details and updates
 
-1. 克隆项目
+2. **Supabase Service**
+   - Database operations and management
+   - Data synchronization and storage
+   - Event data persistence
+
+3. **Google Sheets Service**
+   - Spreadsheet integration
+   - Data formatting and organization
+   - Real-time updates
+
+### Data Flow
+
+1. Event data is fetched from Luma
+2. Data is processed and validated
+3. Synchronization occurs in parallel:
+   - Data is synced to Supabase
+   - Data is synced to Google Sheets
+4. Status and results are reported
+
+## Setup
+
+### Prerequisites
+
+- Node.js environment
+- Luma API access
+- Supabase account and credentials
+- Google Sheets API access
+
+### Environment Variables
+
+```env
+LUMA_API_KEY=your_luma_api_key
+SUPABASE_URL=your_supabase_url
+SUPABASE_SERVICE_KEY=your_supabase_service_key
+GOOGLE_SHEET_ID=your_google_sheet_id
+GOOGLE_CLIENT_EMAIL=your_google_client_email
+GOOGLE_PRIVATE_KEY=your_google_private_key
+```
+
+### Installation
+
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Configure environment variables
+4. Start the service:
+   ```bash
+   npm start
+   ```
+
+## Usage
+
+### Manual Sync
+
+The system can be triggered manually through the API endpoint:
+
 ```bash
-git clone [项目地址]
-cd luma-events-dashboard
+curl -X POST http://your-api-endpoint/sync
 ```
 
-2. 安装依赖
-```bash
-npm install
-# 或
-yarn install
-```
+### Scheduled Sync
 
-3. 配置环境变量
-创建 `.env.local` 文件并添加以下配置：
-```
-NEXT_PUBLIC_SUPABASE_URL=你的_SUPABASE_URL
-NEXT_PUBLIC_SUPABASE_ANON_KEY=你的_SUPABASE_ANON_KEY
-LUMA_API_KEY=你的_LUMA_API_KEY
-```
+The system includes an automated scheduled sync feature that runs at configured intervals.
 
-4. 启动开发服务器
-```bash
-npm run dev
-# 或
-yarn dev
-```
+## Error Handling
 
-## 项目结构
+The system includes comprehensive error handling:
 
-```
-├── src/
-│   ├── app/              # Next.js 应用路由
-│   ├── components/       # React 组件
-│   ├── lib/             # 工具函数和配置
-│   └── types/           # TypeScript 类型定义
-├── workers/             # Cloudflare Workers
-└── public/             # 静态资源
-```
+- Environment variable validation
+- API request error handling
+- Data validation
+- Sync status reporting
+- Detailed error logging
 
-## 数据流程
+## Monitoring
 
-1. Cloudflare Worker 定时从 Luma API 获取数据
-2. 数据经过处理后存入 Supabase
-3. Preset 从 Supabase 读取数据并生成可视化图表
+The system provides detailed logging for:
 
-## 安全说明
+- Sync operations
+- Error conditions
+- Success status
+- Data statistics
 
-- API 密钥存储在 Cloudflare Worker 环境变量中
-- 敏感数据经过脱敏处理
-- 仅展示聚合数据，保护用户隐私
+## Contributing
 
-## 贡献指南
+1. Fork the repository
+2. Create your feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
 
-欢迎提交 Issue 和 Pull Request。
+## License
 
-## 许可证
-
-MIT 
+This project is licensed under the MIT License - see the LICENSE file for details. 
