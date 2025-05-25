@@ -2,13 +2,21 @@ import { LumaEvent, LumaHost, LumaGuest } from '../types/luma';
 import { CalendarEvent } from './luma';
 
 export class GoogleSheetsService {
-  private clientEmail: string;
-  private privateKey: string;
-  private sheetId: string;
+  private readonly credentials: {
+    client_email: string;
+    private_key: string;
+  };
+  private readonly sheetId: string;
 
-  constructor(clientEmail: string, privateKey: string, sheetId: string) {
-    this.clientEmail = clientEmail;
-    this.privateKey = privateKey;
+  constructor(
+    clientEmail: string,
+    privateKey: string,
+    sheetId: string
+  ) {
+    this.credentials = {
+      client_email: clientEmail,
+      private_key: privateKey
+    };
     this.sheetId = sheetId;
   }
 
@@ -59,7 +67,7 @@ export class GoogleSheetsService {
       typ: 'JWT'
     };
     const payload = {
-      iss: this.clientEmail,
+      iss: this.credentials.client_email,
       scope: 'https://www.googleapis.com/auth/spreadsheets',
       aud: 'https://oauth2.googleapis.com/token',
       exp: now + 3600,
@@ -67,13 +75,12 @@ export class GoogleSheetsService {
     };
 
     console.log('准备生成 JWT...');
-    console.log('Client Email:', this.clientEmail);
-    console.log('Private Key 长度:', this.privateKey.length);
-    console.log('Private Key 前50个字符:', this.privateKey.substring(0, 50));
+    console.log('Client Email:', this.credentials.client_email);
+    console.log('Private Key 长度:', this.credentials.private_key.length);
 
     // 验证私钥格式
-    if (!this.privateKey.includes('-----BEGIN PRIVATE KEY-----') || 
-        !this.privateKey.includes('-----END PRIVATE KEY-----')) {
+    if (!this.credentials.private_key.includes('-----BEGIN PRIVATE KEY-----') || 
+        !this.credentials.private_key.includes('-----END PRIVATE KEY-----')) {
       throw new Error('私钥格式不正确，缺少 PEM 头尾');
     }
 
@@ -82,11 +89,7 @@ export class GoogleSheetsService {
     const payloadBase64 = this.base64url(JSON.stringify(payload));
     const toSign = `${headerBase64}.${payloadBase64}`;
 
-    console.log('准备导入私钥...');
-    const keyData = this.str2ab(this.privateKey);
-    console.log('私钥数据长度:', keyData.byteLength);
-    console.log('私钥数据前50个字节:', new Uint8Array(keyData.slice(0, 50)));
-
+    const keyData = this.str2ab(this.credentials.private_key);
     let key: CryptoKey;
     try {
       key = await crypto.subtle.importKey(
@@ -96,39 +99,15 @@ export class GoogleSheetsService {
         false,
         ['sign']
       );
-      console.log('私钥导入成功');
     } catch (error: unknown) {
       console.error('私钥导入失败:', error);
       throw new Error(`私钥导入失败: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    console.log('准备签名...');
     const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, enc.encode(toSign));
     const signatureBase64 = this.base64url(Array.from(new Uint8Array(signature)).map(b => String.fromCharCode(b)).join(''));
 
     const jwt = `${toSign}.${signatureBase64}`;
-    console.log('JWT 生成成功');
-    console.log('JWT 长度:', jwt.length);
-    console.log('JWT 前50个字符:', jwt.substring(0, 50));
-
-    // 验证 JWT 格式
-    const jwtParts = jwt.split('.');
-    if (jwtParts.length !== 3) {
-      throw new Error('JWT 格式不正确，应该包含三部分');
-    }
-
-    // 验证 JWT 各部分长度
-    if (jwtParts[0].length < 10 || jwtParts[1].length < 10 || jwtParts[2].length < 10) {
-      throw new Error('JWT 各部分长度不正确');
-    }
-
-    console.log('准备请求访问令牌...');
-    const tokenUrl = 'https://oauth2.googleapis.com/token';
-    const tokenBody = `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${encodeURIComponent(jwt)}`;
-    
-    console.log('Token URL:', tokenUrl);
-    console.log('Token Body 长度:', tokenBody.length);
-    console.log('Token Body 前50个字符:', tokenBody.substring(0, 50));
 
     // 添加重试逻辑
     let retryCount = 0;
@@ -137,13 +116,13 @@ export class GoogleSheetsService {
 
     while (retryCount < maxRetries) {
       try {
-        const res = await fetch(tokenUrl, {
+        const res = await fetch('https://oauth2.googleapis.com/token', {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/x-www-form-urlencoded',
             'Accept': 'application/json'
           },
-          body: tokenBody
+          body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${encodeURIComponent(jwt)}`
         });
 
         if (!res.ok) {
@@ -151,17 +130,14 @@ export class GoogleSheetsService {
           console.error(`获取访问令牌失败 (尝试 ${retryCount + 1}/${maxRetries}):`, {
             status: res.status,
             statusText: res.statusText,
-            error: errorText,
-            headers: Object.fromEntries(res.headers.entries())
+            error: errorText
           });
           
-          // 如果是服务器错误，等待后重试
           if (res.status >= 500) {
             lastError = new Error(`服务器错误: ${res.status} ${errorText}`);
             retryCount++;
             if (retryCount < maxRetries) {
-              const delay = Math.pow(2, retryCount) * 1000; // 指数退避
-              console.log(`等待 ${delay}ms 后重试...`);
+              const delay = Math.pow(2, retryCount) * 1000;
               await new Promise(resolve => setTimeout(resolve, delay));
               continue;
             }
@@ -172,49 +148,21 @@ export class GoogleSheetsService {
 
         const data = await res.json();
         if (!data.access_token) {
-          console.error('响应中没有访问令牌:', data);
           throw new Error('响应中没有访问令牌');
         }
 
-        console.log('成功获取访问令牌');
         return data.access_token;
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
-        console.error(`获取访问令牌时发生错误 (尝试 ${retryCount + 1}/${maxRetries}):`, lastError);
-        
         retryCount++;
         if (retryCount < maxRetries) {
-          const delay = Math.pow(2, retryCount) * 1000; // 指数退避
-          console.log(`等待 ${delay}ms 后重试...`);
+          const delay = Math.pow(2, retryCount) * 1000;
           await new Promise(resolve => setTimeout(resolve, delay));
         }
       }
     }
 
     throw lastError || new Error('获取访问令牌失败，已达到最大重试次数');
-  }
-
-  // 清除工作表数据
-  private async clearSheet(accessToken: string): Promise<void> {
-    try {
-      const clearUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.sheetId}/values/Sheet1!A1:Z1000:clear`;
-      const response = await fetch(clearUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`清除工作表失败: ${response.status} ${errorText}`);
-      }
-      console.log('成功清除工作表数据');
-    } catch (error) {
-      console.error('清除工作表时发生错误:', error);
-      throw error;
-    }
   }
 
   // 写入数据到指定工作表
@@ -242,11 +190,6 @@ export class GoogleSheetsService {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error('Google Sheets API 错误:', {
-          status: response.status,
-          statusText: response.statusText,
-          error: errorText
-        });
         throw new Error(`Google Sheets API 错误: ${response.status} ${errorText}`);
       }
 
@@ -319,56 +262,33 @@ export class GoogleSheetsService {
 
   // 同步主持人数据
   private async syncHostsData(hosts: LumaHost[]): Promise<void> {
-    try {
-      const accessToken = await this.getAccessToken();
-      console.log('准备同步主持人数据...');
+    const headers = [
+      'Host ID',
+      'Event ID',
+      'Event Name',
+      'Host Name',
+      'Email',
+      'First Name',
+      'Last Name',
+      'Avatar URL',
+      'Created At',
+      'Updated At'
+    ];
 
-      // 准备表头
-      const headers = [
-        'Host ID',
-        'Event ID',
-        'Event Name',  // 添加事件名称
-        'Host Name',
-        'Email',
-        'First Name',
-        'Last Name',
-        'Avatar URL',
-        'Created At',
-        'Updated At'
-      ];
+    const rows = hosts.map(host => [
+      host.api_id,
+      host.event_api_id,
+      host.event_name || '',
+      host.name,
+      host.email,
+      host.first_name || '',
+      host.last_name || '',
+      host.avatar_url || '',
+      host.created_at,
+      host.updated_at
+    ]);
 
-      // 按 event_api_id 分组 hosts
-      const hostsByEvent = hosts.reduce((acc, host) => {
-        if (!acc[host.event_api_id]) {
-          acc[host.event_api_id] = [];
-        }
-        acc[host.event_api_id].push(host);
-        return acc;
-      }, {} as Record<string, LumaHost[]>);
-
-      // 准备数据行
-      const rows = Object.entries(hostsByEvent).flatMap(([eventId, eventHosts]) => {
-        return eventHosts.map(host => [
-          host.api_id,
-          eventId,
-          host.event_name || '',  // 需要从事件数据中获取
-          host.name,
-          host.email,
-          host.first_name || '',
-          host.last_name || '',
-          host.avatar_url || '',
-          host.created_at,
-          host.updated_at
-        ]);
-      });
-
-      // 写入数据
-      await this.writeToSheet('Hosts', [headers, ...rows]);
-      console.log(`成功同步 ${rows.length} 条主持人数据`);
-    } catch (error) {
-      console.error('同步主持人数据时发生错误:', error);
-      throw error;
-    }
+    await this.writeToSheet('Hosts', [headers, ...rows]);
   }
 
   // 同步参与者数据
@@ -423,7 +343,7 @@ export class GoogleSheetsService {
                 title: 'Hosts',
                 gridProperties: {
                   rowCount: 1000,
-                  columnCount: 9
+                  columnCount: 10
                 }
               }
             }
@@ -453,11 +373,6 @@ export class GoogleSheetsService {
 
       if (!createResponse.ok) {
         const errorText = await createResponse.text();
-        console.error('创建工作表失败:', {
-          status: createResponse.status,
-          statusText: createResponse.statusText,
-          error: errorText
-        });
         throw new Error(`创建工作表失败: ${createResponse.status} ${errorText}`);
       }
 
@@ -472,8 +387,8 @@ export class GoogleSheetsService {
       ];
 
       const hostsHeaders = [
-        'API ID', 'Event API ID', 'Name', 'Email', 'First Name',
-        'Last Name', 'Avatar URL', 'Created At', 'Updated At'
+        'Host ID', 'Event ID', 'Event Name', 'Host Name', 'Email',
+        'First Name', 'Last Name', 'Avatar URL', 'Created At', 'Updated At'
       ];
 
       const guestsHeaders = [
