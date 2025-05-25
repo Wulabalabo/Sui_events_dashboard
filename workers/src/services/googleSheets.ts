@@ -171,11 +171,35 @@ export class GoogleSheetsService {
       const accessToken = await this.getAccessToken();
       console.log(`准备写入 ${sheetName} 工作表...`);
       
-      // 修改为 append 模式，使用 POST 请求
-      const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.sheetId}/values/${sheetName}!A1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+      // 先清空工作表数据
+      const clearUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.sheetId}/values/${sheetName}!A1:Z1000?valueInputOption=USER_ENTERED`;
+      await fetch(clearUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ values: [] })
+      });
+      console.log(`${sheetName} 工作表数据已清空`);
       
+      // 写入表头
+      const headers = this.getHeaders(sheetName);
+      const headerUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.sheetId}/values/${sheetName}!A1?valueInputOption=USER_ENTERED`;
+      await fetch(headerUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ values: [headers] })
+      });
+      console.log(`${sheetName} 工作表表头已写入`);
+      
+      // 追加数据
+      const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.sheetId}/values/${sheetName}!A2:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
       const requestBody = {
-        range: `${sheetName}!A1`,
+        range: `${sheetName}!A2`,
         majorDimension: 'ROWS',
         values: values
       };
@@ -195,10 +219,35 @@ export class GoogleSheetsService {
       }
 
       const result = await response.json();
-      console.log(`${sheetName} 工作表写入成功:`, result);
+      console.log(`${sheetName} 工作表数据写入成功:`, result);
     } catch (error) {
       console.error(`写入 ${sheetName} 工作表时发生错误:`, error);
       throw error;
+    }
+  }
+
+  private getHeaders(sheetName: string): string[] {
+    switch (sheetName) {
+      case 'Events':
+        return [
+          'API ID', 'Calendar API ID', 'Name', 'Description', 'Description MD',
+          'Cover URL', 'Start At', 'End At', 'Timezone', 'Duration Interval',
+          'Meeting URL', 'URL', 'User API ID', 'Visibility', 'Zoom Meeting URL',
+          'Geo Address', 'Geo Latitude', 'Geo Longitude', 'Created At', 'Updated At'
+        ];
+      case 'Hosts':
+        return [
+          'Host ID', 'Event ID', 'Event Name', 'Host Name', 'Email',
+          'First Name', 'Last Name', 'Avatar URL', 'Created At', 'Updated At'
+        ];
+      case 'Guests':
+        return [
+          'API ID', 'Event API ID', 'User Name', 'User Email',
+          'User First Name', 'User Last Name', 'Approval Status',
+          'Checked In At', 'Check In QR Code', 'Created At', 'Updated At'
+        ];
+      default:
+        return [];
     }
   }
 

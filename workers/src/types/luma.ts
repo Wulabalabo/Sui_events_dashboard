@@ -18,6 +18,7 @@ export interface LumaHost {
 
 export interface LumaEvent {
   api_id: string;
+  calendar_api_id: string;
   name: string;
   description: string;
   description_md?: string;

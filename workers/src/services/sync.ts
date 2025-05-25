@@ -38,6 +38,10 @@ export class SyncService {
   private readonly EVENTS_PER_FETCH = 50; // 每次获取的事件数量
   private readonly GUESTS_PER_FETCH = 50; // 每次获取50个guests
 
+  // 新增：累积所有hosts和guests
+  private allHosts: any[] = [];
+  private allGuests: any[] = [];
+
   constructor(
     private lumaService: LumaService,
     private sheetsService: GoogleSheetsService,
@@ -93,13 +97,30 @@ export class SyncService {
       });
       console.log('[Queue] State updated with initial events');
 
-      // Sync events list to Google Sheets
-      await (this.sheetsService as any).writeToSheet('Events', eventsResponse.entries.map(e => [
+      // 修正 events 表写入字段顺序
+      const eventsData = eventsResponse.entries.map(e => [
         e.event.api_id,
+        e.event.calendar_api_id,
         e.event.name,
+        e.event.description,
+        e.event.description_md,
+        e.event.cover_url,
         e.event.start_at,
-        e.event.end_at
-      ]));
+        e.event.end_at,
+        e.event.timezone,
+        e.event.duration_interval,
+        e.event.meeting_url,
+        e.event.url,
+        e.event.user_api_id,
+        e.event.visibility,
+        e.event.zoom_meeting_url,
+        e.event.geo_address_json?.address || '',
+        e.event.geo_latitude,
+        e.event.geo_longitude,
+        e.event.created_at,
+        e.event.updated_at
+      ]);
+      await (this.sheetsService as any).writeToSheet('Events', eventsData);
       
       console.log('[Queue] Events list synced to Google Sheets');
 
@@ -134,19 +155,20 @@ export class SyncService {
       });
       console.log(`[Details] Updated state with event details for "${details.event.name}"`);
 
-      // Sync hosts data
-      console.log(`[Details] Preparing to write ${details.hosts.length} hosts to Google Sheets`);
+      // 累积 hosts 数据，确保 event_id 字段填入查询时所用的 eventId
       const hostsData = details.hosts.map(host => [
         host.api_id,
+        eventId, // 使用查询时所用的 eventId
+        host.event_name || '',
         host.name,
         host.email,
-        eventId,
-        details.event.name
+        host.first_name || '',
+        host.last_name || '',
+        host.avatar_url || '',
+        host.created_at,
+        host.updated_at
       ]);
-      console.log('[Details] Hosts data prepared:', JSON.stringify(hostsData));
-      
-      await (this.sheetsService as any).writeToSheet('Hosts', hostsData);
-      console.log(`[Details] Successfully wrote hosts data to Google Sheets for event "${details.event.name}"`);
+      this.allHosts.push(...hostsData);
     } catch (error) {
       console.error(`[Details] Failed to process details for event ${eventId}:`, error);
       throw error;
@@ -191,18 +213,21 @@ export class SyncService {
       );
       console.log(`[Guests] Fetched ${guestsResponse.entries.length} guests for event "${eventDetail.name}"`);
 
-      // 同步到Google Sheets
+      // 累积 guests 数据，确保 event_id 字段填入查询时所用的 eventId
       const guestsData = guestsResponse.entries.map(entry => [
         entry.guest.api_id,
+        eventId, // 使用查询时所用的 eventId
         entry.guest.user_name,
         entry.guest.user_email,
-        eventId,
-        eventDetail.name
+        entry.guest.user_first_name || '',
+        entry.guest.user_last_name || '',
+        entry.guest.approval_status,
+        entry.guest.checked_in_at || '',
+        entry.guest.check_in_qr_code || '',
+        entry.guest.created_at,
+        entry.guest.updated_at
       ]);
-      console.log('[Guests] Prepared guests data:', JSON.stringify(guestsData));
-      
-      await (this.sheetsService as any).writeToSheet('Guests', guestsData);
-      console.log(`[Guests] Successfully wrote guests data to Google Sheets for event "${eventDetail.name}"`);
+      this.allGuests.push(...guestsData);
 
       // 更新guests处理状态
       await this.updateState({
@@ -227,7 +252,6 @@ export class SyncService {
         currentEventGuests: undefined,
         lastProcessedIndex: state.lastProcessedIndex + 1
       });
-
     } catch (error) {
       console.error(`[Guests] Failed to process guests for event ${eventId}:`, error);
       throw error;
@@ -260,13 +284,30 @@ export class SyncService {
         lastSyncTime: Date.now()
       });
 
-      // 同步到 Google Sheets
-      await (this.sheetsService as any).writeToSheet('Events', eventsResponse.entries.map(e => [
+      // 修正 events 表写入字段顺序
+      const eventsData = eventsResponse.entries.map(e => [
         e.event.api_id,
+        e.event.calendar_api_id,
         e.event.name,
+        e.event.description,
+        e.event.description_md,
+        e.event.cover_url,
         e.event.start_at,
-        e.event.end_at
-      ]));
+        e.event.end_at,
+        e.event.timezone,
+        e.event.duration_interval,
+        e.event.meeting_url,
+        e.event.url,
+        e.event.user_api_id,
+        e.event.visibility,
+        e.event.zoom_meeting_url,
+        e.event.geo_address_json?.address || '',
+        e.event.geo_latitude,
+        e.event.geo_longitude,
+        e.event.created_at,
+        e.event.updated_at
+      ]);
+      await (this.sheetsService as any).writeToSheet('Events', eventsData);
 
       console.log(`Fetched and synced ${eventsResponse.entries.length} events`);
     } catch (error) {
@@ -307,7 +348,13 @@ export class SyncService {
         });
         return;
       } else if (currentStage === 'guests') {
-        console.log('[Process] All stages completed');
+        // guests 阶段全部完成，统一写入 hosts/guests
+        console.log('[Process] All stages completed, writing all hosts and guests to Google Sheets...');
+        await this.batchWriteToSheet('Hosts', this.allHosts);
+        await this.batchWriteToSheet('Guests', this.allGuests);
+        // 清空累积的 hosts 和 guests 数组，避免重复写入
+        this.allHosts = [];
+        this.allGuests = [];
         await this.updateState({
           currentStage: 'completed'
         });
@@ -426,6 +473,18 @@ export class SyncService {
     } catch (error) {
       console.error('Failed to cleanup sync state:', error);
       throw error;
+    }
+  }
+
+  // 批量写入 Google Sheets，分批写入，每批50条，间隔1秒
+  private async batchWriteToSheet(sheetName: string, allRows: any[][]) {
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < allRows.length; i += BATCH_SIZE) {
+      const batch = allRows.slice(i, i + BATCH_SIZE);
+      await (this.sheetsService as any).writeToSheet(sheetName, batch);
+      if (i + BATCH_SIZE < allRows.length) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
     }
   }
 } 
