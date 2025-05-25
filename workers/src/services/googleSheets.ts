@@ -171,7 +171,8 @@ export class GoogleSheetsService {
       const accessToken = await this.getAccessToken();
       console.log(`准备写入 ${sheetName} 工作表...`);
       
-      const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.sheetId}/values/${sheetName}!A1?valueInputOption=USER_ENTERED`;
+      // 修改为 append 模式，使用 POST 请求
+      const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.sheetId}/values/${sheetName}!A1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
       
       const requestBody = {
         range: `${sheetName}!A1`,
@@ -179,8 +180,8 @@ export class GoogleSheetsService {
         values: values
       };
 
-      const response = await fetch(updateUrl, {
-        method: 'PUT',
+      const response = await fetch(appendUrl, {
+        method: 'POST',
         headers: {
           'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json'
