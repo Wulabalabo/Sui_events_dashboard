@@ -97,7 +97,7 @@ export class LumaService {
   private readonly REQUEST_TIMEOUT = 10000; // 10秒超时
 
   constructor(private apiKey: string) {
-    this.rateLimiter = new RateLimiter(300);
+    this.rateLimiter = new RateLimiter(60); // 降低到每分钟60个请求
   }
 
   private async fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {

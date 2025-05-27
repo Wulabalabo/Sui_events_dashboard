@@ -33,8 +33,8 @@ export interface SyncState {
 }
 
 export class SyncService {
-  private readonly BATCH_SIZE = 3; // 每批处理3个事件
-  private readonly DELAY_BETWEEN_EVENTS = 1000; // Delay between events in milliseconds
+  private readonly BATCH_SIZE = 1; // 每批处理1个事件
+  private readonly DELAY_BETWEEN_EVENTS = 2000; // 增加事件间延迟到2秒
   private readonly EVENTS_PER_FETCH = 50; // 每次获取的事件数量
   private readonly GUESTS_PER_FETCH = 50; // 每次获取50个guests
 
@@ -206,6 +206,10 @@ export class SyncService {
 
       // 获取一批guests
       console.log(`[Guests] Fetching guests for event "${eventDetail.name}" with cursor: ${guestsState.nextCursor}`);
+      
+      // 添加延迟，避免过快请求
+      await this.delay(2000);
+      
       const guestsResponse = await this.lumaService.getEventGuests(
         eventId,
         guestsState.nextCursor,
@@ -242,7 +246,9 @@ export class SyncService {
 
       // 如果还有更多guests，不更新lastProcessedIndex，这样下次还会处理这个事件
       if (guestsResponse.has_more) {
-        console.log(`[Guests] More guests available for event "${eventDetail.name}"`);
+        console.log(`[Guests] More guests available for event "${eventDetail.name}", total processed: ${guestsState.processedCount + guestsResponse.entries.length}`);
+        // 添加额外延迟，避免过快请求下一页
+        await this.delay(3000);
         return;
       }
 
@@ -254,6 +260,12 @@ export class SyncService {
       });
     } catch (error) {
       console.error(`[Guests] Failed to process guests for event ${eventId}:`, error);
+      // 如果是API限速错误，等待更长时间后重试
+      if (error instanceof Error && error.message.includes('rate limit')) {
+        console.log('[Guests] Rate limit hit, waiting for 30 seconds before retry...');
+        await this.delay(30000);
+        return;
+      }
       throw error;
     }
   }
