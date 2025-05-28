@@ -56,7 +56,7 @@ export class SyncState {
       env.GOOGLE_SHEET_ID
     );
     this.syncService = new SyncService(lumaService, sheetsService, state);
-    
+
     // 初始化静态文件
     this.staticFiles = {
       'index.html': `<!DOCTYPE html>
@@ -264,7 +264,7 @@ export class SyncState {
                 });
                 
                 if (!response.ok) {
-                    throw new Error('HTTP error! status: ' + response.status);
+                    throw new Error('HTTP error! status: ' + response.status + ', body: ' + await response.text());
                 }
                 
                 const result = await response.json();
@@ -397,7 +397,7 @@ export class SyncState {
           const status = await this.syncService.getStatus();
           console.log('[API] Sync status:', status);
           return new Response(JSON.stringify(status), {
-            headers: { 
+            headers: {
               'Content-Type': 'application/json',
               'Cache-Control': 'no-cache, no-store, must-revalidate',
               'Pragma': 'no-cache',
@@ -425,7 +425,12 @@ export class SyncState {
             });
           } catch (error) {
             console.error('[API] Start sync error:', error);
-            return new Response(JSON.stringify({ error: 'start sync error' }), {
+            return new Response(JSON.stringify({
+              error: 'start sync error: ' + (error instanceof Error ? error.message : String(error)),
+              message: error instanceof Error ? error.message : String(error),
+              stack: error instanceof Error ? error.stack : undefined,
+              details: error
+            }), {
               status: 500,
               headers: { 'Content-Type': 'application/json' }
             });
@@ -497,7 +502,7 @@ export class SyncState {
     if (this.processingInterval) {
       clearInterval(this.processingInterval);
     }
-    
+
     // 每5秒处理一次
     this.processingInterval = setInterval(async () => {
       try {
@@ -531,7 +536,7 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const id = env.SYNC_STATE.idFromName('sync-state');
     const syncState = env.SYNC_STATE.get(id);
-    
+
     // 处理待同步的事件
     await syncState.fetch(new Request('http://internal/process'));
   }
