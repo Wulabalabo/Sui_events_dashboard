@@ -123,11 +123,6 @@ export class SyncService {
       await (this.sheetsService as any).writeToSheet('Events', eventsData);
       
       console.log('[Queue] Events list synced to Google Sheets');
-
-      // 立即开始处理事件
-      console.log('[Queue] Starting initial event processing...');
-      await this.processPendingEvents();
-      console.log('[Queue] Initial event processing completed');
     } catch (error) {
       console.error('[Queue] Failed to fetch events list:', error);
       throw error;
