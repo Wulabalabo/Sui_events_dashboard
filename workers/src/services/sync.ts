@@ -33,8 +33,7 @@ export interface SyncState {
 }
 
 export class SyncService {
-  private readonly BATCH_SIZE = 3; // 每批处理3个事件
-  private readonly DELAY_BETWEEN_EVENTS = 1000; // Delay between events in milliseconds
+  private readonly BATCH_SIZE = 1; // 每批处理3个事件
   private readonly EVENTS_PER_FETCH = 50; // 每次获取的事件数量
   private readonly GUESTS_PER_FETCH = 50; // 每次获取50个guests
 
@@ -475,15 +474,23 @@ export class SyncService {
       throw error;
     }
   }
-
-  // 批量写入 Google Sheets，分批写入，每批50条，间隔1秒
+  // 优化批量写入
   private async batchWriteToSheet(sheetName: string, allRows: any[][]) {
     const BATCH_SIZE = 50;
+    const DELAY = 1000; // 1秒延迟
+
     for (let i = 0; i < allRows.length; i += BATCH_SIZE) {
       const batch = allRows.slice(i, i + BATCH_SIZE);
-      await (this.sheetsService as any).writeToSheet(sheetName, batch);
-      if (i + BATCH_SIZE < allRows.length) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+      try {
+        await (this.sheetsService as any).writeToSheet(sheetName, batch);
+        // 添加延迟避免 API 限制
+        if (i + BATCH_SIZE < allRows.length) {
+          await new Promise(resolve => setTimeout(resolve, DELAY));
+        }
+      } catch (error) {
+        console.error(`Failed to write batch to ${sheetName}:`, error);
+        // 可以添加重试逻辑
+        throw error;
       }
     }
   }
