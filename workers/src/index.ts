@@ -140,6 +140,12 @@ export class SyncState {
 
         <div class="status-card">
             <h2>Actions</h2>
+            <div style="margin-bottom: 15px;">
+                <label for="startDate" style="margin-right: 10px;">start date:</label>
+                <input type="datetime-local" id="startDate" style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+                <label for="endDate" style="margin-left: 15px; margin-right: 10px;">end date:</label>
+                <input type="datetime-local" id="endDate" style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+            </div>
             <button class="button" onclick="startSync()">Start Sync</button>
             <button class="button" onclick="stopSync()">Stop Sync</button>
             <button class="button" onclick="resetSync()">Reset Sync</button>
@@ -256,11 +262,19 @@ export class SyncState {
         // Start sync
         async function startSync() {
             try {
+                const startDate = document.getElementById('startDate').value;
+                const endDate = document.getElementById('endDate').value;
+                
+                // 转换为ISO 8601格式
+                const after = startDate ? new Date(startDate).toISOString() : undefined;
+                const before = endDate ? new Date(endDate).toISOString() : undefined;
+                
                 const response = await fetch('/api/sync/start', { 
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
-                    }
+                    },
+                    body: JSON.stringify({ after, before })
                 });
                 
                 if (!response.ok) {
@@ -416,7 +430,9 @@ export class SyncState {
         if (request.method === 'POST') {
           try {
             console.log('[API] Starting sync process...');
-            await this.syncService.queueAllEvents();
+            const body = await request.json();
+            const { after, before } = body;
+            await this.syncService.queueAllEvents(after, before);
             // 启动定时处理
             this.startProcessing();
             console.log('[API] Sync process started');

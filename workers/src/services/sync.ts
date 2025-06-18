@@ -33,13 +33,11 @@ export interface SyncState {
 }
 
 export class SyncService {
-  private readonly BATCH_SIZE = 1; // 每批处理3个事件
-  private readonly EVENTS_PER_FETCH = 50; // 每次获取的事件数量
-  private readonly GUESTS_PER_FETCH = 50; // 每次获取50个guests
-
-  // 新增：累积所有hosts和guests
-  private allHosts: any[] = [];
-  private allGuests: any[] = [];
+  private readonly BATCH_SIZE = 1;
+  private readonly EVENTS_PER_FETCH = 50;
+  private readonly GUESTS_PER_FETCH = 50;
+  private readonly MAX_RETRIES = 3;
+  private readonly RETRY_DELAY = 1000;
 
   constructor(
     private lumaService: LumaService,
@@ -78,13 +76,20 @@ export class SyncService {
   }
 
   // Get all events and start sync
-  public async queueAllEvents(): Promise<void> {
+  public async queueAllEvents(after?: string, before?: string): Promise<void> {
     try {
-      console.log('[Queue] Starting to fetch all events...');
-      const eventsResponse = await this.lumaService.getAllEvents('start_at', 'desc');
-      console.log(`[Queue] Found ${eventsResponse.entries.length} events`);
+      await this.logWithTimestamp('Starting to fetch all events...');
+      const eventsResponse = await this.lumaService.getAllEvents(
+        'start_at',
+        'desc',
+        undefined,
+        this.EVENTS_PER_FETCH,
+        after,
+        before
+      );
+      await this.logWithTimestamp(`Found ${eventsResponse.entries.length} events`);
 
-      // Update state
+      // 更新状态
       await this.updateState({
         currentStage: 'events',
         pendingEvents: eventsResponse.entries.map(e => e.event.api_id),
@@ -94,9 +99,8 @@ export class SyncService {
         nextCursor: eventsResponse.next_cursor,
         hasMore: eventsResponse.has_more
       });
-      console.log('[Queue] State updated with initial events');
 
-      // 修正 events 表写入字段顺序
+      // 写入 events 数据
       const eventsData = eventsResponse.entries.map(e => [
         e.event.api_id,
         e.event.calendar_api_id,
@@ -119,30 +123,50 @@ export class SyncService {
         e.event.created_at,
         e.event.updated_at
       ]);
-      await (this.sheetsService as any).writeToSheet('Events', eventsData);
+      await this.batchWriteToSheet('Events', eventsData);
       
-      console.log('[Queue] Events list synced to Google Sheets');
+      await this.logWithTimestamp('Events list synced to Google Sheets');
 
-      // 立即开始处理事件
-      console.log('[Queue] Starting initial event processing...');
+      // 开始处理事件
       await this.processPendingEvents();
-      console.log('[Queue] Initial event processing completed');
     } catch (error) {
-      console.error('[Queue] Failed to fetch events list:', error);
+      await this.logWithTimestamp('Failed to fetch events list', error);
       throw error;
     }
+  }
+
+  // 添加详细的日志记录
+  private async logWithTimestamp(message: string, data?: any) {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${message}`, data ? JSON.stringify(data) : '');
   }
 
   // Process event details and hosts
   private async processEventDetails(eventId: string): Promise<void> {
     try {
-      console.log(`[Details] Starting to fetch details for event ${eventId}`);
+      await this.logWithTimestamp(`Starting to process details for event ${eventId}`);
       const details = await this.lumaService.getEventDetails(eventId);
-      console.log(`[Details] Successfully fetched details for event "${details.event.name}"`);
-      
       const state = await this.initState();
       
-      // Save event details
+      // 写入 hosts 数据
+      if (details.hosts && details.hosts.length > 0) {
+        const hostsData = details.hosts.map(host => [
+          host.api_id,
+          eventId,
+          host.event_name || '',
+          host.name,
+          host.email,
+          host.first_name || '',
+          host.last_name || '',
+          host.avatar_url || '',
+          host.created_at,
+          host.updated_at
+        ]);
+        await this.batchWriteToSheet('Hosts', hostsData);
+        await this.logWithTimestamp(`Wrote ${details.hosts.length} hosts for event ${eventId}`);
+      }
+
+      // 更新状态
       await this.updateState({
         eventDetails: {
           ...state.eventDetails,
@@ -152,24 +176,10 @@ export class SyncService {
           }
         }
       });
-      console.log(`[Details] Updated state with event details for "${details.event.name}"`);
 
-      // 累积 hosts 数据，确保 event_id 字段填入查询时所用的 eventId
-      const hostsData = details.hosts.map(host => [
-        host.api_id,
-        eventId, // 使用查询时所用的 eventId
-        host.event_name || '',
-        host.name,
-        host.email,
-        host.first_name || '',
-        host.last_name || '',
-        host.avatar_url || '',
-        host.created_at,
-        host.updated_at
-      ]);
-      this.allHosts.push(...hostsData);
+      await this.logWithTimestamp(`Completed processing details for event ${eventId}`);
     } catch (error) {
-      console.error(`[Details] Failed to process details for event ${eventId}:`, error);
+      await this.logWithTimestamp(`Failed to process details for event ${eventId}`, error);
       throw error;
     }
   }
@@ -177,82 +187,79 @@ export class SyncService {
   // Process event guests
   private async processEventGuests(eventId: string): Promise<void> {
     try {
-      console.log(`[Guests] Starting to process guests for event ${eventId}`);
+      await this.logWithTimestamp(`Starting to process guests for event ${eventId}`);
       const state = await this.initState();
       const eventDetail = state.eventDetails[eventId];
       
       if (!eventDetail) {
-        console.error(`[Guests] Event details not found for ${eventId}`);
         throw new Error(`Event details not found for ${eventId}`);
       }
 
-      // 获取或初始化当前事件的guests处理状态
       let guestsState = state.currentEventGuests;
       if (!guestsState || guestsState.eventId !== eventId) {
-        console.log(`[Guests] Initializing guests state for event "${eventDetail.name}"`);
         guestsState = {
           eventId,
           hasMore: true,
-          processedCount: 0
+          processedCount: 0,
+          nextCursor: undefined
         };
       }
 
-      // 如果这个事件的所有guests都处理完了，返回
+      // 如果已经处理完所有 guests，直接返回
       if (!guestsState.hasMore) {
-        console.log(`[Guests] All guests for event "${eventDetail.name}" have been processed`);
+        await this.logWithTimestamp(`All guests for event ${eventId} have been processed`);
         return;
       }
 
-      // 获取一批guests
-      console.log(`[Guests] Fetching guests for event "${eventDetail.name}" with cursor: ${guestsState.nextCursor}`);
+      // 获取一批 guests
       const guestsResponse = await this.lumaService.getEventGuests(
         eventId,
         guestsState.nextCursor,
         this.GUESTS_PER_FETCH
       );
-      console.log(`[Guests] Fetched ${guestsResponse.entries.length} guests for event "${eventDetail.name}"`);
 
-      // 累积 guests 数据，确保 event_id 字段填入查询时所用的 eventId
-      const guestsData = guestsResponse.entries.map(entry => [
-        entry.guest.api_id,
-        eventId, // 使用查询时所用的 eventId
-        entry.guest.user_name,
-        entry.guest.user_email,
-        entry.guest.user_first_name || '',
-        entry.guest.user_last_name || '',
-        entry.guest.approval_status,
-        entry.guest.checked_in_at || '',
-        entry.guest.check_in_qr_code || '',
-        entry.guest.created_at,
-        entry.guest.updated_at
-      ]);
-      this.allGuests.push(...guestsData);
-
-      // 更新guests处理状态
-      await this.updateState({
-        currentEventGuests: {
+      if (guestsResponse.entries.length > 0) {
+        const guestsData = guestsResponse.entries.map(entry => [
+          entry.guest.api_id,
           eventId,
-          nextCursor: guestsResponse.next_cursor,
-          hasMore: guestsResponse.has_more,
-          processedCount: guestsState.processedCount + guestsResponse.entries.length
-        }
-      });
-      console.log(`[Guests] Updated guests state for event "${eventDetail.name}"`);
-
-      // 如果还有更多guests，不更新lastProcessedIndex，这样下次还会处理这个事件
-      if (guestsResponse.has_more) {
-        console.log(`[Guests] More guests available for event "${eventDetail.name}"`);
-        return;
+          entry.guest.user_name,
+          entry.guest.user_email,
+          entry.guest.user_first_name || '',
+          entry.guest.user_last_name || '',
+          entry.guest.approval_status,
+          entry.guest.checked_in_at || '',
+          entry.guest.check_in_qr_code || '',
+          entry.guest.created_at,
+          entry.guest.updated_at
+        ]);
+        await this.batchWriteToSheet('Guests', guestsData);
+        await this.logWithTimestamp(`Wrote ${guestsResponse.entries.length} guests for event ${eventId}`);
       }
 
-      // 如果这个事件的所有guests都处理完了，清除guests状态并更新lastProcessedIndex
-      console.log(`[Guests] All guests processed for event "${eventDetail.name}", moving to next event`);
+      // 更新状态
+      const newGuestsState = {
+        eventId,
+        nextCursor: guestsResponse.next_cursor,
+        hasMore: guestsResponse.has_more,
+        processedCount: guestsState.processedCount + guestsResponse.entries.length
+      };
+
       await this.updateState({
-        currentEventGuests: undefined,
-        lastProcessedIndex: state.lastProcessedIndex + 1
+        currentEventGuests: newGuestsState
       });
+
+      // 如果这个事件的所有 guests 都处理完了，清除 guests 状态并更新 lastProcessedIndex
+      if (!guestsResponse.has_more) {
+        await this.logWithTimestamp(`All guests processed for event ${eventId}, moving to next event`);
+        const currentState = await this.initState();
+        await this.updateState({
+          currentEventGuests: undefined,
+          lastProcessedIndex: currentState.lastProcessedIndex + 1
+        });
+      }
+
     } catch (error) {
-      console.error(`[Guests] Failed to process guests for event ${eventId}:`, error);
+      await this.logWithTimestamp(`Failed to process guests for event ${eventId}`, error);
       throw error;
     }
   }
@@ -317,91 +324,90 @@ export class SyncService {
 
   // Process pending events
   public async processPendingEvents(): Promise<void> {
-    const state = await this.initState();
-    const { pendingEvents, lastProcessedIndex, currentStage } = state;
-    
-    console.log(`[Process] Current stage: ${currentStage}, Last processed index: ${lastProcessedIndex}, Total events: ${pendingEvents.length}`);
-    
-    if (lastProcessedIndex >= pendingEvents.length) {
-      console.log(`[Process] Last processed index (${lastProcessedIndex}) >= Total events (${pendingEvents.length})`);
+    try {
+      const state = await this.initState();
+      const { pendingEvents, lastProcessedIndex, currentStage } = state;
       
-      if (currentStage === 'events') {
-        if (state.hasMore) {
-          console.log('[Process] More events available, fetching next batch...');
-          await this.fetchNextBatch();
+      await this.logWithTimestamp(`Starting to process pending events, current stage: ${currentStage}, processed: ${lastProcessedIndex}, total: ${pendingEvents.length}`);
+      
+      if (lastProcessedIndex >= pendingEvents.length) {
+        await this.logWithTimestamp(`Current batch processing completed, checking next stage`);
+        
+        if (currentStage === 'events') {
+          if (state.hasMore) {
+            await this.logWithTimestamp(`More events available, fetching next batch`);
+            await this.fetchNextBatch();
+            return;
+          }
+          await this.logWithTimestamp(`Moving to details processing stage`);
+          await this.updateState({
+            currentStage: 'details',
+            lastProcessedIndex: 0
+          });
+          return;
+        } else if (currentStage === 'details') {
+          await this.logWithTimestamp(`Moving to guests processing stage`);
+          await this.updateState({
+            currentStage: 'guests',
+            lastProcessedIndex: 0
+          });
+          return;
+        } else if (currentStage === 'guests') {
+          await this.logWithTimestamp(`All stages completed`);
+          await this.updateState({
+            currentStage: 'completed'
+          });
           return;
         }
-        // 开始处理事件详情
-        console.log('[Process] Moving to details stage...');
-        await this.updateState({
-          currentStage: 'details',
-          lastProcessedIndex: 0
-        });
-        return;
-      } else if (currentStage === 'details') {
-        // 开始处理参与者
-        console.log('[Process] Moving to guests stage...');
-        await this.updateState({
-          currentStage: 'guests',
-          lastProcessedIndex: 0
-        });
-        return;
-      } else if (currentStage === 'guests') {
-        // guests 阶段全部完成，统一写入 hosts/guests
-        console.log('[Process] All stages completed, writing all hosts and guests to Google Sheets...');
-        await this.batchWriteToSheet('Hosts', this.allHosts);
-        await this.batchWriteToSheet('Guests', this.allGuests);
-        // 清空累积的 hosts 和 guests 数组，避免重复写入
-        this.allHosts = [];
-        this.allGuests = [];
-        await this.updateState({
-          currentStage: 'completed'
-        });
-        return;
       }
-    }
 
-    // 处理当前批次
-    await this.processBatch(currentStage);
+      await this.processBatch(currentStage);
+    } catch (error) {
+      await this.logWithTimestamp(`Failed to process pending events`, error);
+      throw error;
+    }
   }
 
   private async processBatch(stage: string): Promise<void> {
-    const state = await this.initState();
-    const { pendingEvents, lastProcessedIndex } = state;
-    
-    console.log(`[Batch] Processing ${stage} stage, starting from index ${lastProcessedIndex}`);
-    
-    const batch = pendingEvents.slice(
-      lastProcessedIndex,
-      lastProcessedIndex + this.BATCH_SIZE
-    );
+    try {
+      const state = await this.initState();
+      const { pendingEvents, lastProcessedIndex } = state;
+      
+      await this.logWithTimestamp(`Starting batch processing, stage: ${stage}, start index: ${lastProcessedIndex}`);
+      
+      const batch = pendingEvents.slice(
+        lastProcessedIndex,
+        lastProcessedIndex + this.BATCH_SIZE
+      );
 
-    console.log(`[Batch] Processing batch of ${batch.length} events`);
+      await this.logWithTimestamp(`Processing ${batch.length} events in this batch`);
 
-    for (const eventId of batch) {
-      try {
-        if (stage === 'details') {
-          console.log(`[Batch] Processing details for event ${eventId}`);
-          await this.processEventDetails(eventId);
-        } else if (stage === 'guests') {
-          console.log(`[Batch] Processing guests for event ${eventId}`);
-          await this.processEventGuests(eventId);
+      for (const eventId of batch) {
+        try {
+          if (stage === 'details') {
+            await this.processEventDetails(eventId);
+          } else if (stage === 'guests') {
+            await this.processEventGuests(eventId);
+          }
+        } catch (error) {
+          await this.logWithTimestamp(`Failed to process event ${eventId}`, error);
+          const currentState = await this.initState();
+          await this.updateState({
+            failedEvents: [...currentState.failedEvents, eventId]
+          });
         }
-      } catch (error) {
-        console.error(`[Batch] Failed to process event ${eventId}:`, error);
+      }
+
+      if (stage !== 'guests' || !state.currentEventGuests) {
+        const newIndex = lastProcessedIndex + batch.length;
+        await this.logWithTimestamp(`Updating processing index: ${lastProcessedIndex} -> ${newIndex}`);
         await this.updateState({
-          failedEvents: [...state.failedEvents, eventId]
+          lastProcessedIndex: newIndex
         });
       }
-    }
-
-    // guests 阶段只在没有 currentEventGuests 时才更新 lastProcessedIndex
-    if (stage !== 'guests' || !state.currentEventGuests) {
-      const newIndex = lastProcessedIndex + batch.length;
-      console.log(`[Batch] Updating lastProcessedIndex from ${lastProcessedIndex} to ${newIndex}`);
-      await this.updateState({
-        lastProcessedIndex: newIndex
-      });
+    } catch (error) {
+      await this.logWithTimestamp(`Batch processing failed`, error);
+      throw error;
     }
   }
 
@@ -474,23 +480,41 @@ export class SyncService {
       throw error;
     }
   }
-  // 优化批量写入
-  private async batchWriteToSheet(sheetName: string, allRows: any[][]) {
-    const BATCH_SIZE = 50;
-    const DELAY = 1000; // 1秒延迟
 
-    for (let i = 0; i < allRows.length; i += BATCH_SIZE) {
-      const batch = allRows.slice(i, i + BATCH_SIZE);
-      try {
-        await (this.sheetsService as any).writeToSheet(sheetName, batch);
-        // 添加延迟避免 API 限制
-        if (i + BATCH_SIZE < allRows.length) {
-          await new Promise(resolve => setTimeout(resolve, DELAY));
+  // 优化批量写入方法
+  private async batchWriteToSheet(sheetName: string, rows: any[][]) {
+    if (!rows || rows.length === 0) {
+      await this.logWithTimestamp(`No data to write to ${sheetName}`);
+      return;
+    }
+
+    const BATCH_SIZE = 50;
+    const DELAY = 1000;
+
+    for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+      const batch = rows.slice(i, i + BATCH_SIZE);
+      let retryCount = 0;
+      
+      while (retryCount < this.MAX_RETRIES) {
+        try {
+          await this.logWithTimestamp(`Writing batch ${i/BATCH_SIZE + 1} to ${sheetName}`);
+          await (this.sheetsService as any).writeToSheet(sheetName, batch);
+          await this.logWithTimestamp(`Successfully wrote batch ${i/BATCH_SIZE + 1} to ${sheetName}`);
+          break;
+        } catch (error) {
+          retryCount++;
+          await this.logWithTimestamp(`Failed to write to ${sheetName}, retry ${retryCount}/${this.MAX_RETRIES}`, error);
+          
+          if (retryCount === this.MAX_RETRIES) {
+            throw error;
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * retryCount));
         }
-      } catch (error) {
-        console.error(`Failed to write batch to ${sheetName}:`, error);
-        // 可以添加重试逻辑
-        throw error;
+      }
+
+      if (i + BATCH_SIZE < rows.length) {
+        await new Promise(resolve => setTimeout(resolve, DELAY));
       }
     }
   }

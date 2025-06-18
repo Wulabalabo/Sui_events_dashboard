@@ -156,18 +156,22 @@ export class LumaService {
   }
 
   async getAllEvents(
-    sortBy: 'start_at' | 'created_at' = 'start_at',
-    order: 'asc' | 'desc' = 'desc',
-    cursor?: string,
-    limit: number = 50
+    sortColumn: 'start_at' | 'created_at' = 'start_at',
+    sortDirection: 'asc' | 'desc' = 'desc',
+    paginationCursor?: string,
+    paginationLimit: number = 50,
+    after?: string,
+    before?: string
   ): Promise<CalendarEventsResponse> {
-    console.log('Fetching events list...', cursor ? `(next page: ${cursor})` : '');
+    console.log('Fetching events list...', paginationCursor ? `(next page: ${paginationCursor})` : '');
     
     const queryParams = new URLSearchParams({
-      sort_by: sortBy,
-      order: order,
-      limit: limit.toString(),
-      ...(cursor && { cursor })
+      sort_column: sortColumn,
+      sort_direction: sortDirection,
+      pagination_limit: paginationLimit.toString(),
+      ...(paginationCursor && { pagination_cursor: paginationCursor }),
+      ...(after && { after }),
+      ...(before && { before })
     });
 
     const response = await this.fetchWithAuth(
@@ -179,14 +183,14 @@ export class LumaService {
 
   async getEventGuests(
     eventId: string,
-    cursor?: string,
+    paginationCursor?: string,
     limit: number = 50
   ): Promise<GuestsResponse> {
-    console.log(`Fetching guests for event ${eventId}...`, cursor ? `(next page: ${cursor})` : '');
+    console.log(`Fetching guests for event ${eventId}...`, paginationCursor ? `(next page: ${paginationCursor})` : '');
     
     const queryParams = new URLSearchParams({
-      limit: limit.toString(),
-      ...(cursor && { cursor })
+      pagination_limit: limit.toString(),
+      ...(paginationCursor && { pagination_cursor: paginationCursor })
     });
 
     const response = await this.fetchWithAuth(
