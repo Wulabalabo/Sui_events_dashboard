@@ -79,29 +79,56 @@ export class SyncService {
   public async queueAllEvents(after?: string, before?: string): Promise<void> {
     try {
       await this.logWithTimestamp('Starting to fetch all events...');
-      const eventsResponse = await this.lumaService.getAllEvents(
-        'start_at',
-        'desc',
-        undefined,
-        this.EVENTS_PER_FETCH,
-        after,
-        before
-      );
-      await this.logWithTimestamp(`Found ${eventsResponse.entries.length} events`);
+      
+      let allEvents: any[] = [];
+      let nextCursor: string | undefined = undefined;
+      let hasMore = true;
+      let batchCount = 0;
+      
+      // 循环获取所有事件数据
+      while (hasMore) {
+        batchCount++;
+        await this.logWithTimestamp(`Fetching events batch ${batchCount}...`);
+        
+        const eventsResponse = await this.lumaService.getAllEvents(
+          'start_at',
+          'desc',
+          nextCursor,
+          this.EVENTS_PER_FETCH,
+          after,
+          before
+        );
+        
+        await this.logWithTimestamp(`Batch ${batchCount}: Found ${eventsResponse.entries.length} events`);
+        
+        // 累积所有事件数据
+        allEvents = allEvents.concat(eventsResponse.entries);
+        
+        // 更新分页状态
+        nextCursor = eventsResponse.next_cursor;
+        hasMore = eventsResponse.has_more;
+        
+        // 添加延迟避免API限制
+        if (hasMore) {
+          await this.delay(1000);
+        }
+      }
+      
+      await this.logWithTimestamp(`Total events fetched: ${allEvents.length} in ${batchCount} batches`);
 
       // 更新状态
       await this.updateState({
         currentStage: 'events',
-        pendingEvents: eventsResponse.entries.map(e => e.event.api_id),
+        pendingEvents: allEvents.map(e => e.event.api_id),
         lastProcessedIndex: 0,
         lastSyncTime: Date.now(),
         eventDetails: {},
-        nextCursor: eventsResponse.next_cursor,
-        hasMore: eventsResponse.has_more
+        nextCursor: undefined, // 所有数据已获取完成
+        hasMore: false
       });
 
-      // 写入 events 数据
-      const eventsData = eventsResponse.entries.map(e => [
+      // 写入所有 events 数据
+      const eventsData = allEvents.map(e => [
         e.event.api_id,
         e.event.calendar_api_id,
         e.event.name,
@@ -125,7 +152,7 @@ export class SyncService {
       ]);
       await this.batchWriteToSheet('Events', eventsData);
       
-      await this.logWithTimestamp('Events list synced to Google Sheets');
+      await this.logWithTimestamp('All events synced to Google Sheets');
 
       // 开始处理事件
       await this.processPendingEvents();
@@ -269,18 +296,20 @@ export class SyncService {
     const state = await this.initState();
     
     if (!state.hasMore && state.currentStage === 'events') {
-      console.log('All events have been fetched');
+      await this.logWithTimestamp('All events have been fetched');
       return;
     }
 
     try {
-      console.log('Fetching next batch of events...');
+      await this.logWithTimestamp('Fetching next batch of events...');
       const eventsResponse = await this.lumaService.getAllEvents(
         'start_at',
         'desc',
         state.nextCursor,
         this.EVENTS_PER_FETCH
       );
+
+      await this.logWithTimestamp(`Fetched ${eventsResponse.entries.length} events in this batch`);
 
       // 更新状态
       await this.updateState({
@@ -290,7 +319,7 @@ export class SyncService {
         lastSyncTime: Date.now()
       });
 
-      // 修正 events 表写入字段顺序
+      // 写入 events 数据
       const eventsData = eventsResponse.entries.map(e => [
         e.event.api_id,
         e.event.calendar_api_id,
@@ -313,11 +342,11 @@ export class SyncService {
         e.event.created_at,
         e.event.updated_at
       ]);
-      await (this.sheetsService as any).writeToSheet('Events', eventsData);
+      await this.batchWriteToSheet('Events', eventsData);
 
-      console.log(`Fetched and synced ${eventsResponse.entries.length} events`);
+      await this.logWithTimestamp(`Successfully synced ${eventsResponse.entries.length} events to Google Sheets`);
     } catch (error) {
-      console.error('Failed to fetch events batch:', error);
+      await this.logWithTimestamp('Failed to fetch events batch', error);
       throw error;
     }
   }
