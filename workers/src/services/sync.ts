@@ -84,20 +84,31 @@ export class SyncService {
       let nextCursor: string | undefined = undefined;
       let hasMore = true;
       let batchCount = 0;
+      let isFirst = true;
       
       // 循环获取所有事件数据
       while (hasMore) {
         batchCount++;
         await this.logWithTimestamp(`Fetching events batch ${batchCount}...`);
-        
-        const eventsResponse = await this.lumaService.getAllEvents(
-          'start_at',
-          'desc',
-          nextCursor,
-          this.EVENTS_PER_FETCH,
-          after,
-          before
-        );
+        let eventsResponse;
+        if (isFirst) {
+          eventsResponse = await this.lumaService.getAllEvents(
+            'start_at',
+            'desc',
+            undefined,
+            this.EVENTS_PER_FETCH,
+            after,
+            before
+          );
+          isFirst = false;
+        } else {
+          eventsResponse = await this.lumaService.getAllEvents(
+            'start_at',
+            'desc',
+            nextCursor,
+            this.EVENTS_PER_FETCH
+          );
+        }
         
         await this.logWithTimestamp(`Batch ${batchCount}: Found ${eventsResponse.entries.length} events`);
         
