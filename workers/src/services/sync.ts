@@ -20,7 +20,7 @@ export interface SyncState {
   pendingEvents: string[];
   failedEvents: string[];
   lastProcessedIndex: number;
-  eventDetails: { [key: string]: { name: string, hosts: any[] } };
+  eventDetails: { [key: string]: { name: string, processed: boolean } };
   nextCursor?: string;  // 添加分页游标
   hasMore: boolean;     // 是否还有更多数据
   // 添加guests处理状态
@@ -30,6 +30,10 @@ export interface SyncState {
     hasMore: boolean;
     processedCount: number;
   };
+  // 累积所有guests数据
+  allGuestsData: any[][];
+  // Guests表是否已完成初始化写入（用于首批清空/后续追加）
+  guestsSheetInitialized?: boolean;
 }
 
 export class SyncService {
@@ -38,6 +42,7 @@ export class SyncService {
   private readonly GUESTS_PER_FETCH = 50;
   private readonly MAX_RETRIES = 3;
   private readonly RETRY_DELAY = 1000;
+  private readonly GUESTS_FLUSH_THRESHOLD = 500;
 
   constructor(
     private lumaService: LumaService,
@@ -56,7 +61,9 @@ export class SyncService {
         failedEvents: [],
         lastProcessedIndex: 0,
         eventDetails: {},
-        hasMore: true
+        hasMore: true,
+        allGuestsData: [],
+        guestsSheetInitialized: false
       };
       await this.state.storage.put('syncState', state);
     }
@@ -75,9 +82,37 @@ export class SyncService {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  // Get all events and start sync
+  // 验证同步环境
+  private async validateSyncEnvironment(): Promise<void> {
+    try {
+      await this.logWithTimestamp('Validating sync environment...');
+      
+      // 检查Google Sheets设置
+      const validation = await (this.sheetsService as any).validateSheetsSetup();
+      
+      if (!validation.isValid) {
+        await this.logWithTimestamp('Missing required sheets, attempting to create them...');
+        
+        // 尝试自动创建缺失的工作表
+        await (this.sheetsService as any).ensureAllSheetsExist();
+        
+        await this.logWithTimestamp('Successfully created missing sheets');
+      } else {
+        await this.logWithTimestamp('All required sheets exist');
+      }
+      
+    } catch (error) {
+      await this.logWithTimestamp('Failed to validate sync environment', error);
+      throw new Error(`Sync environment validation failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  // Get all events and start sync - 添加环境验证
   public async queueAllEvents(after?: string, before?: string): Promise<void> {
     try {
+      // 验证同步环境
+      await this.validateSyncEnvironment();
+      
       await this.logWithTimestamp('Starting to fetch all events...');
       
       let allEvents: any[] = [];
@@ -127,15 +162,18 @@ export class SyncService {
       
       await this.logWithTimestamp(`Total events fetched: ${allEvents.length} in ${batchCount} batches`);
 
-      // 更新状态
+      // 更新状态 - 保留分页信息用于后续增量同步
       await this.updateState({
         currentStage: 'events',
         pendingEvents: allEvents.map(e => e.event.api_id),
         lastProcessedIndex: 0,
         lastSyncTime: Date.now(),
         eventDetails: {},
-        nextCursor: undefined, // 所有数据已获取完成
-        hasMore: false
+        nextCursor: nextCursor,  // 保留最后的 cursor
+        hasMore: hasMore,        // 保留 hasMore 状态
+        // 新一轮同步，重置 Guests 写入状态
+        guestsSheetInitialized: false,
+        allGuestsData: []
       });
 
       // 写入所有 events 数据
@@ -161,6 +199,7 @@ export class SyncService {
         e.event.created_at,
         e.event.updated_at
       ]);
+      
       await this.batchWriteToSheet('Events', eventsData);
       
       await this.logWithTimestamp('All events synced to Google Sheets');
@@ -179,45 +218,27 @@ export class SyncService {
     console.log(`[${timestamp}] ${message}`, data ? JSON.stringify(data) : '');
   }
 
-  // Process event details and hosts
+  // Process event details - 移除hosts处理逻辑
   private async processEventDetails(eventId: string): Promise<void> {
     try {
       await this.logWithTimestamp(`Starting to process details for event ${eventId}`);
       const details = await this.lumaService.getEventDetails(eventId);
       const state = await this.initState();
       
-      // 写入 hosts 数据
-      if (details.hosts && details.hosts.length > 0) {
-        const hostsData = details.hosts.map(host => [
-          host.api_id,
-          eventId,
-          host.event_name || '',
-          host.name,
-          host.email,
-          host.first_name || '',
-          host.last_name || '',
-          host.avatar_url || '',
-          host.created_at,
-          host.updated_at
-        ]);
-        await this.batchWriteToSheet('Hosts', hostsData);
-        await this.logWithTimestamp(`Wrote ${details.hosts.length} hosts for event ${eventId}`);
-      }
-
-      // 更新状态
+      // 只保存事件详细信息，不再处理hosts数据
       await this.updateState({
         eventDetails: {
           ...state.eventDetails,
-          [eventId]: {
+          [eventId]: { 
             name: details.event.name,
-            hosts: details.hosts
+            processed: true
           }
         }
       });
-
-      await this.logWithTimestamp(`Completed processing details for event ${eventId}`);
+      
+      await this.logWithTimestamp(`Event ${eventId} details processed successfully`);
     } catch (error) {
-      await this.logWithTimestamp(`Failed to process details for event ${eventId}`, error);
+      await this.logWithTimestamp(`Failed to process event ${eventId} details`, error);
       throw error;
     }
   }
@@ -227,11 +248,6 @@ export class SyncService {
     try {
       await this.logWithTimestamp(`Starting to process guests for event ${eventId}`);
       const state = await this.initState();
-      const eventDetail = state.eventDetails[eventId];
-      
-      if (!eventDetail) {
-        throw new Error(`Event details not found for ${eventId}`);
-      }
 
       let guestsState = state.currentEventGuests;
       if (!guestsState || guestsState.eventId !== eventId) {
@@ -270,8 +286,16 @@ export class SyncService {
           entry.guest.created_at,
           entry.guest.updated_at
         ]);
-        await this.batchWriteToSheet('Guests', guestsData);
-        await this.logWithTimestamp(`Wrote ${guestsResponse.entries.length} guests for event ${eventId}`);
+        
+        // 累积guests数据到状态中
+        const updatedAllGuestsData = [...state.allGuestsData, ...guestsData];
+        await this.updateState({ allGuestsData: updatedAllGuestsData });
+        await this.logWithTimestamp(`Accumulated ${guestsResponse.entries.length} guests for event ${eventId}, total guests: ${updatedAllGuestsData.length}`);
+
+        // 达到阈值则分批写入（流式冲洗）
+        if (updatedAllGuestsData.length >= this.GUESTS_FLUSH_THRESHOLD) {
+          await this.flushGuestsBuffer(false);
+        }
       }
 
       // 更新状态
@@ -299,6 +323,29 @@ export class SyncService {
     } catch (error) {
       await this.logWithTimestamp(`Failed to process guests for event ${eventId}`, error);
       throw error;
+    }
+  }
+
+  // 冲洗 Guests 缓冲区（首批清空，后续追加）
+  private async flushGuestsBuffer(isFinal: boolean): Promise<void> {
+    const currentState = await this.initState();
+    const buffer = currentState.allGuestsData || [];
+    if (!buffer.length) {
+      await this.logWithTimestamp(`No guests buffer to flush${isFinal ? ' (final)' : ''}`);
+      return;
+    }
+
+    const initialized = Boolean(currentState.guestsSheetInitialized);
+    await this.logWithTimestamp(`Flushing guests buffer (${buffer.length} rows) - initialized: ${initialized}, final: ${isFinal}`);
+
+    if (!initialized) {
+      // 首次：清空并写入
+      await this.sheetsService.batchWriteToSheet('Guests', buffer, false);
+      await this.updateState({ guestsSheetInitialized: true, allGuestsData: [] });
+    } else {
+      // 追加写入
+      await this.sheetsService.batchWriteToSheet('Guests', buffer, true);
+      await this.updateState({ allGuestsData: [] });
     }
   }
 
@@ -379,20 +426,25 @@ export class SyncService {
             await this.fetchNextBatch();
             return;
           }
-          await this.logWithTimestamp(`Moving to details processing stage`);
+          // 跳过 details 阶段，直接进入 guests
+          await this.logWithTimestamp(`Moving directly to guests processing stage`);
           await this.updateState({
-            currentStage: 'details',
+            currentStage: 'guests',
             lastProcessedIndex: 0
           });
           return;
         } else if (currentStage === 'details') {
-          await this.logWithTimestamp(`Moving to guests processing stage`);
+          // 兼容旧状态：如果还在 details，则直接进入 guests
+          await this.logWithTimestamp(`Skipping details stage, moving to guests processing stage`);
           await this.updateState({
             currentStage: 'guests',
             lastProcessedIndex: 0
           });
           return;
         } else if (currentStage === 'guests') {
+          await this.logWithTimestamp(`Guests processing completed, flushing remaining guests buffer`);
+          await this.flushGuestsBuffer(true);
+          
           await this.logWithTimestamp(`All stages completed`);
           await this.updateState({
             currentStage: 'completed'
@@ -462,16 +514,40 @@ export class SyncService {
   }> {
     const state = await this.initState();
     const totalEvents = state.pendingEvents.length;
-    const processedEvents = state.lastProcessedIndex;
-    const progress = totalEvents > 0 ? (processedEvents / totalEvents) * 100 : 0;
+    
+    // 计算整体进度，考虑所有阶段
+    let overallProgress = 0;
+    
+    if (totalEvents > 0) {
+      const processedEvents = state.lastProcessedIndex;
+      const eventsWeight = 0.2;
+      const guestsWeight = 0.8;
+
+      if (state.currentStage === 'events') {
+        overallProgress = (processedEvents / totalEvents) * eventsWeight * 100;
+      } else if (state.currentStage === 'guests') {
+        const baseProgress = eventsWeight * 100; // 事件阶段视为已完成
+        let guestsProgress = (processedEvents / totalEvents) * guestsWeight * 100;
+        if (state.currentEventGuests && state.currentEventGuests.processedCount > 0) {
+          // 给正在处理的当前事件一点额外进度权重（粗略估算）
+          guestsProgress = Math.min(guestsProgress + (guestsWeight * 100) / totalEvents * 0.5, guestsWeight * 100);
+        }
+        overallProgress = baseProgress + guestsProgress;
+      } else if (state.currentStage === 'completed') {
+        overallProgress = 100;
+      }
+    }
+    
+    // 确保进度在0-100之间
+    overallProgress = Math.max(0, Math.min(100, overallProgress));
 
     return {
       lastSyncTime: state.lastSyncTime,
       currentStage: state.currentStage,
       totalEvents,
-      processedEvents,
+      processedEvents: state.lastProcessedIndex,
       failedEvents: state.failedEvents.length,
-      progress
+      progress: overallProgress
     };
   }
 
@@ -495,7 +571,8 @@ export class SyncService {
       lastProcessedIndex: 0,
       eventDetails: {},
       hasMore: true,
-      currentEventGuests: undefined
+      currentEventGuests: undefined,
+      allGuestsData: []
     });
     console.log('Sync state reset');
   }
@@ -511,7 +588,8 @@ export class SyncService {
         lastProcessedIndex: 0,
         eventDetails: {},
         hasMore: true,
-        currentEventGuests: undefined
+        currentEventGuests: undefined,
+        allGuestsData: []
       });
       
       console.log('Sync state cleaned up successfully');
@@ -522,12 +600,32 @@ export class SyncService {
   }
 
   // 优化批量写入方法
-  private async batchWriteToSheet(sheetName: string, rows: any[][]) {
+  private async batchWriteToSheet(sheetName: string, rows: any[][], useOptimized: boolean = true) {
     if (!rows || rows.length === 0) {
       await this.logWithTimestamp(`No data to write to ${sheetName}`);
       return;
     }
 
+    try {
+      await this.logWithTimestamp(`Starting to write ${rows.length} rows to ${sheetName}`);
+      
+      if (useOptimized) {
+        // 使用优化的批量写入方法
+        await this.sheetsService.batchWriteToSheet(sheetName, rows);
+      } else {
+        // 使用传统的分批写入方法
+        await this.legacyBatchWrite(sheetName, rows);
+      }
+      
+      await this.logWithTimestamp(`Successfully wrote all ${rows.length} rows to ${sheetName}`);
+    } catch (error) {
+      await this.logWithTimestamp(`Failed to write to ${sheetName}`, error);
+      throw error;
+    }
+  }
+
+  // 传统的分批写入方法（作为备用）
+  private async legacyBatchWrite(sheetName: string, rows: any[][]) {
     const BATCH_SIZE = 50;
     const DELAY = 1000;
 
@@ -537,13 +635,16 @@ export class SyncService {
       
       while (retryCount < this.MAX_RETRIES) {
         try {
-          await this.logWithTimestamp(`Writing batch ${i/BATCH_SIZE + 1} to ${sheetName}`);
-          await (this.sheetsService as any).writeToSheet(sheetName, batch);
-          await this.logWithTimestamp(`Successfully wrote batch ${i/BATCH_SIZE + 1} to ${sheetName}`);
+          await this.logWithTimestamp(`Writing batch ${Math.floor(i/BATCH_SIZE) + 1} to ${sheetName}`);
+          
+          // 使用 GoogleSheetsService 的 writeToSheet 方法
+          await this.sheetsService.writeToSheet(sheetName, batch);
+          
+          await this.logWithTimestamp(`Successfully wrote batch ${Math.floor(i/BATCH_SIZE) + 1} to ${sheetName}`);
           break;
         } catch (error) {
           retryCount++;
-          await this.logWithTimestamp(`Failed to write to ${sheetName}, retry ${retryCount}/${this.MAX_RETRIES}`, error);
+          await this.logWithTimestamp(`Failed to write batch to ${sheetName}, retry ${retryCount}/${this.MAX_RETRIES}`, error);
           
           if (retryCount === this.MAX_RETRIES) {
             throw error;
@@ -556,6 +657,41 @@ export class SyncService {
       if (i + BATCH_SIZE < rows.length) {
         await new Promise(resolve => setTimeout(resolve, DELAY));
       }
+    }
+  }
+
+  // 优化的事件同步方法 - 移除hosts参数
+  public async syncEventsOptimized(events: any[], guests: any[], useIncremental: boolean = false): Promise<void> {
+    try {
+      await this.logWithTimestamp('Starting optimized events sync...');
+      
+      if (useIncremental) {
+        // 使用增量更新
+        await (this.sheetsService as any).syncEventsOptimized(events, guests, true);
+      } else {
+        // 使用批量更新
+        await (this.sheetsService as any).syncEventsOptimized(events, guests, false);
+      }
+      
+      await this.logWithTimestamp('Optimized events sync completed');
+    } catch (error) {
+      await this.logWithTimestamp('Failed to sync events optimized', error);
+      throw error;
+    }
+  }
+
+  // 简化的事件同步方法 - 移除hosts参数
+  public async syncEvents(events: any[], guests: any[]): Promise<void> {
+    try {
+      await this.logWithTimestamp('Starting events sync...');
+      
+      // 使用传统同步方法
+      await (this.sheetsService as any).syncEvents(events, guests);
+      
+      await this.logWithTimestamp('Events sync completed');
+    } catch (error) {
+      await this.logWithTimestamp('Failed to sync events', error);
+      throw error;
     }
   }
 } 
