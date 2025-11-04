@@ -502,13 +502,21 @@ export class GoogleSheetsService {
 
     // 处理剩余批次（追加模式）
     const startIndex = append ? 0 : BATCH_SIZE;
+    
+    // 如果是追加模式，需要先获取当前的行数
+    let currentRow = 1; // 默认从第1行开始（表头）
+    if (append) {
+      currentRow = await this.getNextAvailableRow(sheetName, accessToken);
+    }
+    
     for (let i = startIndex; i < values.length; i += BATCH_SIZE) {
       const batch = values.slice(i, i + BATCH_SIZE);
       
-      // 获取下一个可用行号
-      const startRow = await this.getNextAvailableRow(sheetName, accessToken);
+      // 计算要写入的行范围
+      const startRow = currentRow;
       const endRow = startRow + batch.length - 1;
       const endColLetter = this.columnIndexToLetter(headers.length);
+      
       // 确保尺寸
       await this.ensureSheetSize(sheetName, accessToken, endRow + 10, headers.length);
       const range = `${sheetName}!A${startRow}:${endColLetter}${endRow}`;
@@ -532,7 +540,10 @@ export class GoogleSheetsService {
         throw new Error(`Batch write error for ${sheetName}: ${updateRes.status} ${errorText}`);
       }
 
-      console.log(`Batch ${Math.floor((i - startIndex) / BATCH_SIZE) + 1} written to ${sheetName} (${batch.length} rows)`);
+      console.log(`Batch ${Math.floor((i - startIndex) / BATCH_SIZE) + 1} written to ${sheetName} (rows ${startRow}-${endRow}, ${batch.length} rows)`);
+      
+      // 更新当前行号，避免重复计算
+      currentRow = endRow + 1;
 
       // 批次间延迟，避免API限制
       if (i + BATCH_SIZE < values.length) {

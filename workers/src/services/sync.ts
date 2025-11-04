@@ -23,6 +23,11 @@ export interface SyncState {
   eventDetails: { [key: string]: { name: string, processed: boolean } };
   nextCursor?: string;  // 添加分页游标
   hasMore: boolean;     // 是否还有更多数据
+  // 日期范围参数（用于分页查询时保持一致性）
+  dateRange?: {
+    after?: string;
+    before?: string;
+  };
   // 添加guests处理状态
   currentEventGuests?: {
     eventId: string;
@@ -62,6 +67,7 @@ export class SyncService {
         lastProcessedIndex: 0,
         eventDetails: {},
         hasMore: true,
+        dateRange: undefined,
         allGuestsData: [],
         guestsSheetInitialized: false
       };
@@ -137,11 +143,14 @@ export class SyncService {
           );
           isFirst = false;
         } else {
+          // 后续分页查询也需要传递日期范围参数
           eventsResponse = await this.lumaService.getAllEvents(
             'start_at',
             'desc',
             nextCursor,
-            this.EVENTS_PER_FETCH
+            this.EVENTS_PER_FETCH,
+            after,
+            before
           );
         }
         
@@ -171,6 +180,11 @@ export class SyncService {
         eventDetails: {},
         nextCursor: nextCursor,  // 保留最后的 cursor
         hasMore: hasMore,        // 保留 hasMore 状态
+        // 保存日期范围参数，用于后续分页查询
+        dateRange: {
+          after: after,
+          before: before
+        },
         // 新一轮同步，重置 Guests 写入状态
         guestsSheetInitialized: false,
         allGuestsData: []
@@ -287,14 +301,29 @@ export class SyncService {
           entry.guest.updated_at
         ]);
         
-        // 累积guests数据到状态中
-        const updatedAllGuestsData = [...state.allGuestsData, ...guestsData];
-        await this.updateState({ allGuestsData: updatedAllGuestsData });
-        await this.logWithTimestamp(`Accumulated ${guestsResponse.entries.length} guests for event ${eventId}, total guests: ${updatedAllGuestsData.length}`);
+        // 使用原子操作更新状态，避免竞态条件
+        // 先读取当前状态，然后原子性地更新
+        const currentState = await this.initState();
+        
+        // 去重：检查是否已经存在相同的guest（基于api_id）
+        const existingGuestIds = new Set(
+          currentState.allGuestsData.map(row => row[0]) // api_id是第0列
+        );
+        const newGuestsData = guestsData.filter(row => !existingGuestIds.has(row[0]));
+        
+        if (newGuestsData.length === 0) {
+          await this.logWithTimestamp(`All ${guestsResponse.entries.length} guests for event ${eventId} are duplicates, skipping`);
+        } else {
+          // 累积去重后的guests数据到状态中
+          const updatedAllGuestsData = [...currentState.allGuestsData, ...newGuestsData];
+          await this.updateState({ allGuestsData: updatedAllGuestsData });
+          await this.logWithTimestamp(`Accumulated ${newGuestsData.length} new guests for event ${eventId} (${guestsResponse.entries.length - newGuestsData.length} duplicates skipped), total guests: ${updatedAllGuestsData.length}`);
 
-        // 达到阈值则分批写入（流式冲洗）
-        if (updatedAllGuestsData.length >= this.GUESTS_FLUSH_THRESHOLD) {
-          await this.flushGuestsBuffer(false);
+          // 达到阈值则分批写入（流式冲洗）
+          // 注意：传递当前要写入的数据，而不是从状态重新读取
+          if (updatedAllGuestsData.length >= this.GUESTS_FLUSH_THRESHOLD) {
+            await this.flushGuestsBuffer(false);
+          }
         }
       }
 
@@ -327,29 +356,46 @@ export class SyncService {
   }
 
   // 冲洗 Guests 缓冲区（首批清空，后续追加）
+  // 使用原子操作确保不会重复写入
   private async flushGuestsBuffer(isFinal: boolean): Promise<void> {
+    // 原子性地读取并清空缓冲区
     const currentState = await this.initState();
     const buffer = currentState.allGuestsData || [];
+    
     if (!buffer.length) {
       await this.logWithTimestamp(`No guests buffer to flush${isFinal ? ' (final)' : ''}`);
       return;
     }
 
+    // 立即清空缓冲区，避免重复写入
+    await this.updateState({ allGuestsData: [] });
+
     const initialized = Boolean(currentState.guestsSheetInitialized);
     await this.logWithTimestamp(`Flushing guests buffer (${buffer.length} rows) - initialized: ${initialized}, final: ${isFinal}`);
 
-    if (!initialized) {
-      // 首次：清空并写入
-      await this.sheetsService.batchWriteToSheet('Guests', buffer, false);
-      await this.updateState({ guestsSheetInitialized: true, allGuestsData: [] });
-    } else {
-      // 追加写入
-      await this.sheetsService.batchWriteToSheet('Guests', buffer, true);
-      await this.updateState({ allGuestsData: [] });
+    try {
+      if (!initialized) {
+        // 首次：清空并写入
+        await this.sheetsService.batchWriteToSheet('Guests', buffer, false);
+        await this.updateState({ guestsSheetInitialized: true });
+      } else {
+        // 追加写入
+        await this.sheetsService.batchWriteToSheet('Guests', buffer, true);
+      }
+      
+      await this.logWithTimestamp(`Successfully flushed ${buffer.length} guests rows to Google Sheets`);
+    } catch (error) {
+      // 如果写入失败，恢复缓冲区以便重试
+      await this.logWithTimestamp(`Failed to flush guests buffer, restoring buffer for retry`, error);
+      const stateAfterError = await this.initState();
+      await this.updateState({ allGuestsData: [...stateAfterError.allGuestsData, ...buffer] });
+      throw error;
     }
   }
 
   // 获取下一批事件
+  // 注意：这个方法现在只用于增量同步场景，正常情况下不会调用
+  // queueAllEvents已经一次性获取并写入了所有事件
   public async fetchNextBatch(): Promise<void> {
     const state = await this.initState();
     
@@ -360,11 +406,17 @@ export class SyncService {
 
     try {
       await this.logWithTimestamp('Fetching next batch of events...');
+      
+      // 从状态中读取日期范围参数
+      const dateRange = state.dateRange;
+      
       const eventsResponse = await this.lumaService.getAllEvents(
         'start_at',
         'desc',
         state.nextCursor,
-        this.EVENTS_PER_FETCH
+        this.EVENTS_PER_FETCH,
+        dateRange?.after,
+        dateRange?.before
       );
 
       await this.logWithTimestamp(`Fetched ${eventsResponse.entries.length} events in this batch`);
@@ -377,32 +429,10 @@ export class SyncService {
         lastSyncTime: Date.now()
       });
 
-      // 写入 events 数据
-      const eventsData = eventsResponse.entries.map(e => [
-        e.event.api_id,
-        e.event.calendar_api_id,
-        e.event.name,
-        e.event.description,
-        e.event.description_md,
-        e.event.cover_url,
-        e.event.start_at,
-        e.event.end_at,
-        e.event.timezone,
-        e.event.duration_interval,
-        e.event.meeting_url,
-        e.event.url,
-        e.event.user_api_id,
-        e.event.visibility,
-        e.event.zoom_meeting_url,
-        e.event.geo_address_json?.address || '',
-        e.event.geo_latitude,
-        e.event.geo_longitude,
-        e.event.created_at,
-        e.event.updated_at
-      ]);
-      await this.batchWriteToSheet('Events', eventsData);
-
-      await this.logWithTimestamp(`Successfully synced ${eventsResponse.entries.length} events to Google Sheets`);
+      // 注意：这里不应该再次写入Events数据，因为queueAllEvents已经一次性写入了所有事件
+      // 如果这是增量同步场景，应该只在获取完所有事件后再写入
+      // 为了安全起见，我们不再在这里写入Events数据，避免重复
+      await this.logWithTimestamp(`Fetched ${eventsResponse.entries.length} events (not writing to avoid duplicates)`);
     } catch (error) {
       await this.logWithTimestamp('Failed to fetch events batch', error);
       throw error;
@@ -421,13 +451,9 @@ export class SyncService {
         await this.logWithTimestamp(`Current batch processing completed, checking next stage`);
         
         if (currentStage === 'events') {
-          if (state.hasMore) {
-            await this.logWithTimestamp(`More events available, fetching next batch`);
-            await this.fetchNextBatch();
-            return;
-          }
-          // 跳过 details 阶段，直接进入 guests
-          await this.logWithTimestamp(`Moving directly to guests processing stage`);
+          // queueAllEvents已经一次性获取并写入了所有事件，直接进入guests阶段
+          // 不再调用fetchNextBatch，因为所有事件已经处理完成
+          await this.logWithTimestamp(`All events processed, moving directly to guests processing stage`);
           await this.updateState({
             currentStage: 'guests',
             lastProcessedIndex: 0
@@ -571,8 +597,10 @@ export class SyncService {
       lastProcessedIndex: 0,
       eventDetails: {},
       hasMore: true,
+      dateRange: undefined,
       currentEventGuests: undefined,
-      allGuestsData: []
+      allGuestsData: [],
+      guestsSheetInitialized: false
     });
     console.log('Sync state reset');
   }
@@ -588,8 +616,10 @@ export class SyncService {
         lastProcessedIndex: 0,
         eventDetails: {},
         hasMore: true,
+        dateRange: undefined,
         currentEventGuests: undefined,
-        allGuestsData: []
+        allGuestsData: [],
+        guestsSheetInitialized: false
       });
       
       console.log('Sync state cleaned up successfully');

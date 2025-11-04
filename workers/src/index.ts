@@ -319,14 +319,43 @@ export class SyncState {
         // Start sync
         async function startSync() {
             try {
-                const startDate = document.getElementById('startDate').value;
-                const endDate = document.getElementById('endDate').value;
+                const startDateInput = document.getElementById('startDate');
+                const endDateInput = document.getElementById('endDate');
+                const startDate = startDateInput ? startDateInput.value : '';
+                const endDate = endDateInput ? endDateInput.value : '';
+                
+                // 验证日期范围
+                if (startDate && endDate) {
+                    const start = new Date(startDate);
+                    const end = new Date(endDate);
+                    if (start > end) {
+                        addLog('Start date must be before end date', 'error');
+                        return;
+                    }
+                }
                 
                 const body = {};
-                if (startDate) body.after = new Date(startDate).toISOString();
-                if (endDate) body.before = new Date(endDate).toISOString();
+                // 正确转换日期为ISO 8601 UTC格式
+                // datetime-local输入框返回的是本地时间格式（YYYY-MM-DDTHH:mm）
+                // 需要确保正确转换为UTC时间
+                if (startDate) {
+                    const startDateObj = new Date(startDate);
+                    if (isNaN(startDateObj.getTime())) {
+                        addLog('Invalid start date format', 'error');
+                        return;
+                    }
+                    body.after = startDateObj.toISOString();
+                }
+                if (endDate) {
+                    const endDateObj = new Date(endDate);
+                    if (isNaN(endDateObj.getTime())) {
+                        addLog('Invalid end date format', 'error');
+                        return;
+                    }
+                    body.before = endDateObj.toISOString();
+                }
                 
-                addLog('Starting sync...');
+                addLog('Starting sync...' + (startDate || endDate ? ` (Date range: ${startDate || 'unlimited'} to ${endDate || 'unlimited'})` : ''));
                 const response = await fetch('/api/sync/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
