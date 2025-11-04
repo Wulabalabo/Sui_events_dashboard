@@ -355,7 +355,7 @@ export class SyncState {
                     body.before = endDateObj.toISOString();
                 }
                 
-                addLog('Starting sync...' + (startDate || endDate ? ` (Date range: ${startDate || 'unlimited'} to ${endDate || 'unlimited'})` : ''));
+                addLog('Starting sync...' + (startDate || endDate ? ' (Date range: ' + (startDate || 'unlimited') + ' to ' + (endDate || 'unlimited') + ')' : ''));
                 const response = await fetch('/api/sync/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
