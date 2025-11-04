@@ -171,9 +171,9 @@ export class SyncService {
       
       await this.logWithTimestamp(`Total events fetched: ${allEvents.length} in ${batchCount} batches`);
 
-      // 更新状态 - 保留分页信息用于后续增量同步
+      // 更新状态 - 直接进入guests阶段，因为事件数据已经一次性获取并写入了
       await this.updateState({
-        currentStage: 'events',
+        currentStage: 'guests',  // 直接进入guests阶段，跳过events阶段
         pendingEvents: allEvents.map(e => e.event.api_id),
         lastProcessedIndex: 0,
         lastSyncTime: Date.now(),
@@ -513,10 +513,58 @@ export class SyncService {
           await this.updateState({
             failedEvents: [...currentState.failedEvents, eventId]
           });
+          
+          // 对于 guests 阶段，如果处理失败，需要确保 lastProcessedIndex 能够正确更新
+          // 否则流程会卡住
+          if (stage === 'guests') {
+            const updatedState = await this.initState();
+            // 如果失败的事件是当前正在处理的事件，清除 currentEventGuests 并更新 lastProcessedIndex
+            if (updatedState.currentEventGuests && updatedState.currentEventGuests.eventId === eventId) {
+              await this.logWithTimestamp(`Clearing currentEventGuests for failed event ${eventId} and updating lastProcessedIndex`);
+              await this.updateState({
+                currentEventGuests: undefined,
+                lastProcessedIndex: updatedState.lastProcessedIndex + 1
+              });
+            } else if (!updatedState.currentEventGuests) {
+              // 如果 currentEventGuests 不存在，说明 processEventGuests 可能已经更新了 lastProcessedIndex
+              // 但为了安全，确保它确实更新了
+              const expectedIndex = updatedState.lastProcessedIndex;
+              if (expectedIndex <= currentState.lastProcessedIndex) {
+                await this.logWithTimestamp(`Updating lastProcessedIndex after failed event ${eventId}`);
+                await this.updateState({
+                  lastProcessedIndex: currentState.lastProcessedIndex + 1
+                });
+              }
+            }
+          }
         }
       }
 
-      if (stage !== 'guests' || !state.currentEventGuests) {
+      // 对于 guests 阶段，需要特殊处理：
+      // processEventGuests 在处理完一个事件的所有 guests 后，会清除 currentEventGuests 并更新 lastProcessedIndex
+      // 所以 processBatch 不应该更新 lastProcessedIndex，避免重复更新
+      // 但是，需要确保如果某个事件处理失败，lastProcessedIndex 仍然能正确更新
+      if (stage === 'guests') {
+        // 重新读取状态，检查哪些事件已经处理完
+        const updatedState = await this.initState();
+        const currentEventGuests = updatedState.currentEventGuests;
+        
+        // 如果 currentEventGuests 不存在，说明当前 batch 中的最后一个事件的所有 guests 都已经处理完
+        // 此时 processEventGuests 已经更新了 lastProcessedIndex，不需要再次更新
+        
+        // 如果 currentEventGuests 存在且 eventId 在当前 batch 中，说明当前事件还有更多 guests 需要处理
+        // 此时不应该更新 lastProcessedIndex
+        
+        // 如果 currentEventGuests 存在但 eventId 不在当前 batch 中，说明已经移动到下一个事件了
+        // 这种情况不应该发生，因为我们是按顺序处理的
+        
+        // 关键：processEventGuests 已经处理了 lastProcessedIndex 的更新，所以这里不需要更新
+        // 但是，如果 batch 中有多个事件，并且前面的事件都处理完了，需要确保状态正确
+        // 实际上，由于 BATCH_SIZE = 1，每次只处理一个事件，所以不会有这个问题
+        
+        await this.logWithTimestamp(`Batch processing completed for guests stage. Current event guests state: ${currentEventGuests ? `event ${currentEventGuests.eventId}, hasMore: ${currentEventGuests.hasMore}` : 'none (all completed)'}`);
+      } else {
+        // 非 guests 阶段，直接更新 lastProcessedIndex
         const newIndex = lastProcessedIndex + batch.length;
         await this.logWithTimestamp(`Updating processing index: ${lastProcessedIndex} -> ${newIndex}`);
         await this.updateState({
